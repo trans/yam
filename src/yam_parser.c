@@ -70,6 +70,9 @@ struct yam_parser {
     bool stream_ended;
     bool doc_open;
 
+    /* schema (optional, for tag resolution) */
+    const yam_schema *schema;
+
     /* safety limit */
     int max_events;
 };
@@ -88,6 +91,15 @@ static bool over_limit(yam_parser *p) {
 }
 
 static bool enqueue(yam_parser *p, yam_event evt) {
+    /* resolve tag via schema if set and no explicit tag */
+    if (p->schema && evt.tag.data == NULL) {
+        if (evt.type == YAM_EVT_SCALAR)
+            evt.tag = yam_schema_resolve(p->schema, &evt);
+        else if (evt.type == YAM_EVT_MAPPING_START)
+            evt.tag = p->schema->default_map_tag;
+        else if (evt.type == YAM_EVT_SEQUENCE_START)
+            evt.tag = p->schema->default_seq_tag;
+    }
     if (over_limit(p)) return false;
     if (p->evt_len >= p->evt_cap) {
         int new_cap = p->evt_cap * 2;
@@ -1509,6 +1521,10 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
     /* stream already parsed, just drain */
     *evt = evt_simple(YAM_EVT_NONE);
     return YAM_OK;
+}
+
+void yam_parser_set_schema(yam_parser *p, const yam_schema *schema) {
+    if (p) p->schema = schema;
 }
 
 void yam_parser_free(yam_parser *p) {

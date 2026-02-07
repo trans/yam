@@ -17,8 +17,9 @@ OBJS    := $(SRCS:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
 LIB     := $(OBJDIR)/libyam.a
 TEST    := $(OBJDIR)/test_scanner
 TEST_SUITE := $(OBJDIR)/test_yaml_suite
+TEST_SCHEMA := $(OBJDIR)/test_schema
 
-.PHONY: all clean test test-suite test-all bench
+.PHONY: all clean test test-suite test-schema test-all bench
 
 all: $(LIB) $(TEST)
 
@@ -43,6 +44,9 @@ $(OBJDIR)/bench_scanner_cmp: $(TESTDIR)/bench_scanner.c $(LIB)
 $(TEST_SUITE): $(TESTDIR)/test_yaml_suite.c $(LIB)
 	$(CC) $(CFLAGS) $< -L$(OBJDIR) -lyam -o $@
 
+$(TEST_SCHEMA): $(TESTDIR)/test_schema.c $(LIB)
+	$(CC) $(CFLAGS) $< -L$(OBJDIR) -lyam -o $@
+
 test: $(TEST)
 	@echo "─── Running scanner tests ───"
 	@./$(TEST)
@@ -51,7 +55,11 @@ test-suite: $(TEST_SUITE)
 	@echo "─── Running YAML Test Suite ───"
 	@./$(TEST_SUITE) $(ARGS)
 
-test-all: test test-suite
+test-schema: $(TEST_SCHEMA)
+	@echo "─── Running schema tests ───"
+	@./$(TEST_SCHEMA)
+
+test-all: test test-suite test-schema
 
 bench: $(OBJDIR)/bench_scanner
 	@./$(OBJDIR)/bench_scanner $(SIZE)
