@@ -18,8 +18,9 @@ LIB     := $(OBJDIR)/libyam.a
 TEST    := $(OBJDIR)/test_scanner
 TEST_SUITE := $(OBJDIR)/test_yaml_suite
 TEST_SCHEMA := $(OBJDIR)/test_schema
+TEST_EMITTER := $(OBJDIR)/test_emitter
 
-.PHONY: all clean test test-suite test-schema test-all bench
+.PHONY: all clean test test-suite test-schema test-emitter test-all bench
 
 all: $(LIB) $(TEST)
 
@@ -47,6 +48,9 @@ $(TEST_SUITE): $(TESTDIR)/test_yaml_suite.c $(LIB)
 $(TEST_SCHEMA): $(TESTDIR)/test_schema.c $(LIB)
 	$(CC) $(CFLAGS) $< -L$(OBJDIR) -lyam -o $@
 
+$(TEST_EMITTER): $(TESTDIR)/test_emitter.c $(LIB)
+	$(CC) $(CFLAGS) $< -L$(OBJDIR) -lyam -o $@
+
 test: $(TEST)
 	@echo "─── Running scanner tests ───"
 	@./$(TEST)
@@ -59,7 +63,11 @@ test-schema: $(TEST_SCHEMA)
 	@echo "─── Running schema tests ───"
 	@./$(TEST_SCHEMA)
 
-test-all: test test-suite test-schema
+test-emitter: $(TEST_EMITTER)
+	@echo "─── Running emitter tests ───"
+	@./$(TEST_EMITTER)
+
+test-all: test test-suite test-schema test-emitter
 
 bench: $(OBJDIR)/bench_scanner
 	@./$(OBJDIR)/bench_scanner $(SIZE)
