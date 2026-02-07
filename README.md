@@ -12,7 +12,9 @@ an event-based parser, and an arena allocator. Passes 363 of 406
 ```
 make            # build libyam.a
 make test       # run scanner unit tests
+make test-schema # run schema/tag resolution tests
 make test-suite # run YAML Test Suite (requires git submodules)
+make test-all   # run all tests
 ```
 
 Requires a C11 compiler. Tested with GCC and Clang on Linux and macOS.
@@ -72,6 +74,8 @@ yam_scanner_free(scanner);
 | `yam_mark` | Source position (`offset`, `line`, `col`) |
 | `yam_token` | Scanner output (`type`, `value`, `scalar_style`, `start`, `end`) |
 | `yam_event` | Parser output (`type`, `value`, `anchor`, `tag`, `scalar_style`, `flow`) |
+| `yam_schema` | Tag resolution schema (failsafe, JSON, core, or custom) |
+| `yam_schema_rule` | Single resolution rule (`match`, `pattern`, `tag`) |
 
 ### Event Types
 
@@ -83,6 +87,59 @@ yam_scanner_free(scanner);
 | `SEQUENCE_START` / `SEQUENCE_END` | Sequence (list) |
 | `SCALAR` | Scalar value |
 | `ALIAS` | Alias reference (`*name`) |
+
+## Tag Schemas
+
+yam supports pluggable tag resolution per YAML 1.2 Chapter 10. Three
+built-in schemas ship as presets:
+
+| Schema | Resolves |
+|--------|----------|
+| **Failsafe** | Everything is `!!str` / `!!seq` / `!!map` |
+| **JSON** | `null`, `true`/`false`, integers, floats |
+| **Core** | JSON + `Null`/`NULL`/`~`, `True`/`TRUE`/`False`/`FALSE`, `0x`/`0o` ints |
+
+Schema is opt-in — without `yam_parser_set_schema()`, scalars have no tag.
+
+```c
+yam_schema core = yam_schema_core();
+yam_parser_set_schema(parser, &core);
+
+/* events now carry resolved tags:
+ *   "true"  → tag:yaml.org,2002:bool
+ *   "42"    → tag:yaml.org,2002:int
+ *   "hello" → tag:yaml.org,2002:str
+ *   "null"  → tag:yaml.org,2002:null
+ * quoted scalars always resolve to !!str
+ * explicit tags (!!str, !foo) are never overwritten */
+```
+
+### Custom Schemas
+
+Build your own schema to support YAML 1.1 booleans (`yes`/`no`/`on`/`off`)
+or any other resolution rules:
+
+```c
+yam_schema_builder *b = yam_schema_builder_new(arena);
+
+const char *trues[]  = {"true","True","TRUE","yes","Yes","YES","on","On","ON"};
+const char *falses[] = {"false","False","FALSE","no","No","NO","off","Off","OFF"};
+yam_schema_builder_add_bools(b, trues, 9, falses, 9);
+
+const char *nulls[] = {"null","Null","NULL","~",""};
+yam_schema_builder_add_nulls(b, nulls, 5);
+
+yam_schema_builder_add_int(b);    /* 42, 0xFF, 0o77 */
+yam_schema_builder_add_float(b);  /* 3.14, .inf, .nan */
+
+yam_schema schema = yam_schema_builder_finish(b);
+yam_schema_builder_free(b);
+
+yam_parser_set_schema(parser, &schema);
+```
+
+Rules are matched in order (first match wins). Match types: `YAM_MATCH_EXACT`,
+`YAM_MATCH_ICASE`, and `YAM_MATCH_BUILTIN` (procedural int/float matchers).
 
 ## Architecture
 
