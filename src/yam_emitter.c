@@ -133,12 +133,6 @@ static void pop_ctx(yam_emitter *e) {
     if (e->stack_len > 0) e->stack_len--;
 }
 
-static bool in_flow(yam_emitter *e) {
-    emit_ctx *ctx = top_ctx(e);
-    if (!ctx) return false;
-    return ctx->type == EMIT_CTX_FLOW_MAP || ctx->type == EMIT_CTX_FLOW_SEQ;
-}
-
 static bool in_any_flow(yam_emitter *e) {
     for (int i = e->stack_len - 1; i >= 0; i--) {
         if (e->stack[i].type == EMIT_CTX_FLOW_MAP ||

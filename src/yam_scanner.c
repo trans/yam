@@ -187,14 +187,6 @@ static yam_token tok_scalar(yam_str value, yam_scalar_style style,
     };
 }
 
-/* ── Push pending block structure tokens ─────────────────── */
-
-static bool push_pending(yam_scanner *s, yam_token tok) {
-    if (s->pending_count >= 4) return false;
-    s->pending[s->pending_count++] = tok;
-    return true;
-}
-
 static bool maybe_unroll_indents(yam_scanner *s, int col) {
     while (s->indent > col) {
         indent_pop(s);

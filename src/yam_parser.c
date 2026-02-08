@@ -372,7 +372,7 @@ static yam_status parse_flow_sequence(yam_parser *p);
 static yam_status parse_flow_mapping(yam_parser *p);
 static yam_status parse_block_sequence(yam_parser *p, int seq_indent);
 static yam_status parse_block_mapping(yam_parser *p, int map_indent);
-static yam_status parse_block_map_value(yam_parser *p, int map_indent, bool explicit_key);
+static yam_status parse_block_map_value(yam_parser *p, int map_indent);
 
 /* ── Parse flow sequence contents ────────────────────────── */
 
@@ -635,7 +635,7 @@ static yam_status parse_flow_node(yam_parser *p) {
 
 /* ── Parse block map value ───────────────────────────────── */
 
-static yam_status parse_block_map_value(yam_parser *p, int map_indent, bool explicit_key) {
+static yam_status parse_block_map_value(yam_parser *p, int map_indent) {
     if (p->oom) return YAM_ERR_MEMORY;
     yam_status st = peek_token(p);
     if (st != YAM_OK) return st;
@@ -724,7 +724,7 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
             }
 
             /* parse value */
-            st = parse_block_map_value(p, map_indent, true);
+            st = parse_block_map_value(p, map_indent);
             if (st != YAM_OK) return st;
             continue;
         }
@@ -732,7 +732,7 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
         /* empty key + value (: at map indent) */
         if (tt == YAM_TOK_BLOCK_MAP_VALUE && col == map_indent) {
             emit_empty(p); /* empty key */
-            st = parse_block_map_value(p, map_indent, false);
+            st = parse_block_map_value(p, map_indent);
             if (st != YAM_OK) return st;
             continue;
         }
@@ -772,7 +772,7 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
             if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
                 /* confirmed key */
                 enqueue(p, evt);
-                st = parse_block_map_value(p, map_indent, false);
+                st = parse_block_map_value(p, map_indent);
                 if (st != YAM_OK) return st;
                 continue;
             }
@@ -795,7 +795,7 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
 
             if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
                 enqueue(p, evt);
-                st = parse_block_map_value(p, map_indent, false);
+                st = parse_block_map_value(p, map_indent);
                 if (st != YAM_OK) return st;
                 continue;
             }
@@ -813,7 +813,7 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
             if (st != YAM_OK) return st;
 
             if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
-                st = parse_block_map_value(p, map_indent, false);
+                st = parse_block_map_value(p, map_indent);
                 if (st != YAM_OK) return st;
                 continue;
             }
@@ -938,7 +938,7 @@ static yam_status parse_block_node(yam_parser *p) {
                 push_ctx(p, CTX_BLOCK_MAP, scalar_col);
                 enqueue(p, evt); /* key scalar with inner anchor/tag */
 
-                st = parse_block_map_value(p, scalar_col, false);
+                st = parse_block_map_value(p, scalar_col);
                 if (st != YAM_OK) return st;
                 st = parse_block_mapping(p, scalar_col);
                 if (st != YAM_OK) return st;
@@ -1015,7 +1015,7 @@ static yam_status parse_block_node(yam_parser *p) {
             if (st != YAM_OK) return st;
 
             if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
-                st = parse_block_map_value(p, flow_col, false);
+                st = parse_block_map_value(p, flow_col);
                 if (st != YAM_OK) return st;
                 st = parse_block_mapping(p, flow_col);
                 if (st != YAM_OK) return st;
@@ -1057,7 +1057,7 @@ static yam_status parse_block_node(yam_parser *p) {
             enqueue(p, map_evt);
             push_ctx(p, CTX_BLOCK_MAP, alias_col);
             enqueue(p, evt); /* alias as key (no props) */
-            st = parse_block_map_value(p, alias_col, false);
+            st = parse_block_map_value(p, alias_col);
             if (st != YAM_OK) return st;
             st = parse_block_mapping(p, alias_col);
             if (st != YAM_OK) return st;
@@ -1103,7 +1103,7 @@ static yam_status parse_block_node(yam_parser *p) {
                     (p->evt_len - saved_evt_len - 1) * sizeof(yam_event));
             p->events[saved_evt_len] = map_evt;
             push_ctx(p, CTX_BLOCK_MAP, flow_col);
-            st = parse_block_map_value(p, flow_col, false);
+            st = parse_block_map_value(p, flow_col);
             if (st != YAM_OK) return st;
             st = parse_block_mapping(p, flow_col);
             if (st != YAM_OK) return st;
@@ -1143,7 +1143,7 @@ static yam_status parse_block_node(yam_parser *p) {
                     (p->evt_len - saved_evt_len - 1) * sizeof(yam_event));
             p->events[saved_evt_len] = map_evt;
             push_ctx(p, CTX_BLOCK_MAP, flow_col);
-            st = parse_block_map_value(p, flow_col, false);
+            st = parse_block_map_value(p, flow_col);
             if (st != YAM_OK) return st;
             st = parse_block_mapping(p, flow_col);
             if (st != YAM_OK) return st;
@@ -1264,7 +1264,7 @@ static yam_status parse_block_node(yam_parser *p) {
                     enqueue(p, evt);
                 }
 
-                st = parse_block_map_value(p, map_col, false);
+                st = parse_block_map_value(p, map_col);
                 if (st != YAM_OK) return st;
 
                 /* continue mapping for more keys at same indent */
@@ -1312,7 +1312,7 @@ static yam_status parse_block_node(yam_parser *p) {
             key_evt.value = YAM_STR_NULL;
             attach_props(p, &key_evt);
             enqueue(p, key_evt);
-            st = parse_block_map_value(p, map_col, false);
+            st = parse_block_map_value(p, map_col);
             if (st != YAM_OK) return st;
             st = parse_block_mapping(p, map_col);
         } else {
