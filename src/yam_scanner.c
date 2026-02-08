@@ -16,6 +16,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 /* ── Indent stack ────────────────────────────────────────── */
 
@@ -60,7 +61,19 @@ struct yam_scanner {
 
     /* arena for string duplication when needed */
     yam_arena   *arena;
+
+    /* error context */
+    char      error_msg[256];
+    yam_mark  error_mark;
 };
+
+/* ── Error reporting ─────────────────────────────────────── */
+
+#define SCAN_ERROR(s, msg) do { \
+    snprintf((s)->error_msg, sizeof((s)->error_msg), "%s", (msg)); \
+    (s)->error_mark = mark(s); \
+    return YAM_ERR_SCAN; \
+} while(0)
 
 /* ── Helpers ─────────────────────────────────────────────── */
 
@@ -486,7 +499,7 @@ static yam_status scan_single_quoted(yam_scanner *s, yam_token *tok) {
             }
             /* document indicators at start of line in multi-line quoted scalar → error */
             if (s->col == 1 && is_doc_indicator_at(s->buf, s->pos, s->len))
-                return YAM_ERR_SCAN;
+                SCAN_ERROR(s, "document indicator in single-quoted scalar");
             SQ_ENSURE(break_count);
             if (break_count == 1) {
                 buf[out++] = ' ';
@@ -501,7 +514,7 @@ static yam_status scan_single_quoted(yam_scanner *s, yam_token *tok) {
         }
     }
 
-    if (PEEK(s) != '\'') return YAM_ERR_SCAN; /* unterminated */
+    if (PEEK(s) != '\'') SCAN_ERROR(s, "unterminated single-quoted scalar");
     advance(s, 1); /* skip closing ' */
 
     buf[out] = '\0';
@@ -535,7 +548,7 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
     while (!AT_END(s) && PEEK(s) != '"') {
         if (PEEK(s) == '\\') {
             advance(s, 1);
-            if (AT_END(s)) return YAM_ERR_SCAN;
+            if (AT_END(s)) SCAN_ERROR(s, "incomplete escape at end of input");
 
             uint8_t esc = PEEK(s);
             advance(s, 1);
@@ -563,9 +576,9 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
                     buf[out++] = (char)0xA0;
                     break;
                 case 'x': { /* \xNN */
-                    if (REMAINING(s) < 2) return YAM_ERR_SCAN;
+                    if (REMAINING(s) < 2) SCAN_ERROR(s, "incomplete \\x escape sequence");
                     uint8_t hi = PEEK(s), lo = PEEK_AT(s, 1);
-                    if (!yam_is_hex(hi) || !yam_is_hex(lo)) return YAM_ERR_SCAN;
+                    if (!yam_is_hex(hi) || !yam_is_hex(lo)) SCAN_ERROR(s, "invalid hex digit in \\x escape");
                     uint8_t byte = (hex_digit(hi) << 4) | hex_digit(lo);
                     advance(s, 2);
                     buf[out++] = (char)byte;
@@ -574,16 +587,16 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
                 case 'u': /* \uNNNN */
                 case 'U': { /* \UNNNNNNNN */
                     int ndigits = (esc == 'u') ? 4 : 8;
-                    if ((int)REMAINING(s) < ndigits) return YAM_ERR_SCAN;
+                    if ((int)REMAINING(s) < ndigits) SCAN_ERROR(s, "incomplete unicode escape sequence");
                     uint32_t cp = 0;
                     for (int i = 0; i < ndigits; i++) {
                         uint8_t c = PEEK_AT(s, i);
-                        if (!yam_is_hex(c)) return YAM_ERR_SCAN;
+                        if (!yam_is_hex(c)) SCAN_ERROR(s, "invalid hex digit in unicode escape");
                         cp = (cp << 4) | hex_digit(c);
                     }
                     advance(s, ndigits);
-                    if (cp > 0x10FFFF) return YAM_ERR_SCAN;
-                    if (cp >= 0xD800 && cp <= 0xDFFF) return YAM_ERR_SCAN;
+                    if (cp > 0x10FFFF) SCAN_ERROR(s, "unicode codepoint exceeds U+10FFFF");
+                    if (cp >= 0xD800 && cp <= 0xDFFF) SCAN_ERROR(s, "surrogate pair in unicode escape");
                     /* encode as UTF-8 */
                     if (cp <= 0x7F) {
                         buf[out++] = (char)cp;
@@ -610,7 +623,7 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
                     content_end = out; /* escaped newline doesn't affect trim */
                     continue; /* skip content_end update below */
                 default:
-                    return YAM_ERR_SCAN; /* invalid escape */
+                    SCAN_ERROR(s, "invalid escape sequence");
             }
             /* all escape sequences produce content (not trimmable whitespace) */
             content_end = out;
@@ -627,7 +640,7 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
             }
             /* document indicators at start of line in multi-line quoted scalar → error */
             if (s->col == 1 && is_doc_indicator_at(s->buf, s->pos, s->len))
-                return YAM_ERR_SCAN;
+                SCAN_ERROR(s, "document indicator in double-quoted scalar");
             if (break_count == 1) {
                 buf[out++] = ' ';
             } else {
@@ -642,7 +655,7 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
         }
     }
 
-    if (PEEK(s) != '"') return YAM_ERR_SCAN;
+    if (PEEK(s) != '"') SCAN_ERROR(s, "unterminated double-quoted scalar");
     advance(s, 1);
 
     buf[out] = '\0';
@@ -706,7 +719,7 @@ static yam_status scan_anchor_or_alias(yam_scanner *s, yam_token *tok) {
         advance(s, 1);
     }
     size_t name_len = BUF_AT(s) - name_start;
-    if (name_len == 0) return YAM_ERR_SCAN;
+    if (name_len == 0) SCAN_ERROR(s, "empty anchor or alias name");
 
     s->last_token_col = (int)start.col - 1;
     *tok = (yam_token){
@@ -973,7 +986,7 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
         if (!AT_END(s) && PEEK(s) == '#') {
             while (!AT_END(s) && !yam_is_break(PEEK(s))) advance(s, 1);
         }
-        if (!AT_END(s) && !yam_is_break(PEEK(s))) return YAM_ERR_SCAN;
+        if (!AT_END(s) && !yam_is_break(PEEK(s))) SCAN_ERROR(s, "invalid block scalar indicator");
         if (!AT_END(s)) skip_break(s);
 
         /* determine content indent level */
@@ -1216,6 +1229,16 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
 
     /* plain scalar — the common case, SIMD-accelerated */
     return scan_plain_scalar(s, tok);
+}
+
+const char *yam_scanner_error(yam_scanner *s) {
+    if (!s || s->error_msg[0] == '\0') return NULL;
+    return s->error_msg;
+}
+
+yam_mark yam_scanner_error_mark(yam_scanner *s) {
+    if (!s) return (yam_mark){0, 0, 0};
+    return s->error_mark;
 }
 
 void yam_scanner_free(yam_scanner *s) {

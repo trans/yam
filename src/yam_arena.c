@@ -8,6 +8,7 @@
 #include "yam/yam.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 /* ── Block ───────────────────────────────────────────────── */
 
@@ -114,6 +115,27 @@ void yam_arena_reset(yam_arena *a) {
     keep->used = 0;
     a->head    = keep;
     a->blocks  = keep;
+}
+
+/* ── File input ──────────────────────────────────────────── */
+
+yam_str yam_read_file(const char *path, yam_arena *a) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return (yam_str){NULL, 0};
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (size < 0) { fclose(f); return (yam_str){NULL, 0}; }
+
+    char *buf = yam_arena_alloc(a, (size_t)size, 1);
+    if (!buf) { fclose(f); return (yam_str){NULL, 0}; }
+
+    size_t nread = fread(buf, 1, (size_t)size, f);
+    fclose(f);
+
+    return (yam_str){buf, nread};
 }
 
 void yam_arena_free(yam_arena *a) {

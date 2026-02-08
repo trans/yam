@@ -14,6 +14,7 @@
 #include "yam/yam.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 /* ── Context types ───────────────────────────────────────── */
 
@@ -81,7 +82,19 @@ struct yam_parser {
 
     /* safety limit */
     int max_events;
+
+    /* error context */
+    char     error_msg[256];
+    yam_mark error_mark;
 };
+
+/* ── Error reporting ─────────────────────────────────────── */
+
+#define PARSE_ERROR(p, msg) do { \
+    snprintf((p)->error_msg, sizeof((p)->error_msg), "%s", (msg)); \
+    (p)->error_mark = (p)->current.start; \
+    return YAM_ERR_PARSE; \
+} while(0)
 
 /* ── Helpers ─────────────────────────────────────────────── */
 
@@ -150,7 +163,14 @@ static ctx_entry *top_ctx(yam_parser *p) {
 static yam_status peek_token(yam_parser *p) {
     if (p->have_token) return YAM_OK;
     yam_status st = yam_scan_next(p->scanner, &p->current);
-    if (st != YAM_OK) return st;
+    if (st != YAM_OK) {
+        const char *smsg = yam_scanner_error(p->scanner);
+        if (smsg) {
+            snprintf(p->error_msg, sizeof(p->error_msg), "%s", smsg);
+            p->error_mark = yam_scanner_error_mark(p->scanner);
+        }
+        return st;
+    }
     p->have_token = true;
     return YAM_OK;
 }
@@ -359,7 +379,7 @@ static yam_status parse_flow_sequence(yam_parser *p) {
     yam_status st;
 
     for (;;) {
-        if (over_limit(p)) return YAM_ERR_PARSE;
+        if (over_limit(p)) PARSE_ERROR(p, "event limit exceeded");
         st = peek_token(p);
         if (st != YAM_OK) return st;
 
@@ -467,7 +487,7 @@ check_flow_sep:
             continue; /* will be handled at top of loop */
         }
 
-        return YAM_ERR_PARSE;
+        PARSE_ERROR(p, "expected ',' or ']' in flow sequence");
     }
 }
 
@@ -477,7 +497,7 @@ static yam_status parse_flow_mapping(yam_parser *p) {
     yam_status st;
 
     for (;;) {
-        if (over_limit(p)) return YAM_ERR_PARSE;
+        if (over_limit(p)) PARSE_ERROR(p, "event limit exceeded");
         st = peek_token(p);
         if (st != YAM_OK) return st;
 
@@ -537,7 +557,7 @@ static yam_status parse_flow_mapping(yam_parser *p) {
             continue;
         }
 
-        return YAM_ERR_PARSE;
+        PARSE_ERROR(p, "expected ',' or '}' in flow mapping");
     }
 }
 
@@ -660,7 +680,7 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
     yam_status st;
 
     for (;;) {
-        if (over_limit(p)) return YAM_ERR_PARSE;
+        if (over_limit(p)) PARSE_ERROR(p, "event limit exceeded");
         st = peek_token(p);
         if (st != YAM_OK) return st;
 
@@ -806,7 +826,7 @@ static yam_status parse_block_sequence(yam_parser *p, int seq_indent) {
     yam_status st;
 
     for (;;) {
-        if (over_limit(p)) return YAM_ERR_PARSE;
+        if (over_limit(p)) PARSE_ERROR(p, "event limit exceeded");
         st = peek_token(p);
         if (st != YAM_OK) return st;
 
@@ -1463,7 +1483,7 @@ static yam_status parse_stream(yam_parser *p) {
         /* if no progress was made, consume the problematic token */
         if (p->evt_len == prev_evts) {
             consume_token(p);
-            if (++guard > 10000) return YAM_ERR_PARSE;
+            if (++guard > 10000) PARSE_ERROR(p, "parser stuck, possible malformed input");
         } else {
             guard = 0;
         }
@@ -2012,6 +2032,16 @@ void yam_parser_set_merge(yam_parser *p, bool enable) {
 
 void yam_parser_set_resolve(yam_parser *p, bool enable) {
     if (p) p->resolve_enabled = enable;
+}
+
+const char *yam_parser_error(yam_parser *p) {
+    if (!p || p->error_msg[0] == '\0') return NULL;
+    return p->error_msg;
+}
+
+yam_mark yam_parser_error_mark(yam_parser *p) {
+    if (!p) return (yam_mark){0, 0, 0};
+    return p->error_mark;
 }
 
 void yam_parser_free(yam_parser *p) {

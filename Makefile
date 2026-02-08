@@ -21,8 +21,9 @@ TEST_SCHEMA := $(OBJDIR)/test_schema
 TEST_EMITTER := $(OBJDIR)/test_emitter
 TEST_MERGE := $(OBJDIR)/test_merge
 TEST_RESOLVE := $(OBJDIR)/test_resolve
+TEST_ERRORS := $(OBJDIR)/test_errors
 
-.PHONY: all clean test test-suite test-schema test-emitter test-merge test-resolve test-all bench
+.PHONY: all clean test test-suite test-schema test-emitter test-merge test-resolve test-errors test-all bench
 
 all: $(LIB) $(TEST)
 
@@ -83,7 +84,14 @@ test-resolve: $(TEST_RESOLVE)
 	@echo "─── Running resolve tests ───"
 	@./$(TEST_RESOLVE)
 
-test-all: test test-suite test-schema test-emitter test-merge test-resolve
+$(TEST_ERRORS): $(TESTDIR)/test_errors.c $(LIB)
+	$(CC) $(CFLAGS) $< -L$(OBJDIR) -lyam -o $@
+
+test-errors: $(TEST_ERRORS)
+	@echo "─── Running error tests ───"
+	@./$(TEST_ERRORS)
+
+test-all: test test-suite test-schema test-emitter test-merge test-resolve test-errors
 
 bench: $(OBJDIR)/bench_scanner
 	@./$(OBJDIR)/bench_scanner $(SIZE)

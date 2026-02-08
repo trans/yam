@@ -139,12 +139,18 @@ char       *yam_arena_dup(yam_arena *a, const char *src, size_t len);
 void        yam_arena_reset(yam_arena *a);
 void        yam_arena_free(yam_arena *a);
 
+/* ── File input ─────────────────────────────────────────── */
+
+yam_str     yam_read_file(const char *path, yam_arena *a);
+
 /* ── Scanner ─────────────────────────────────────────────── */
 
 typedef struct yam_scanner yam_scanner;
 
 yam_scanner *yam_scanner_new(const char *input, size_t len, yam_arena *a);
 yam_status   yam_scan_next(yam_scanner *s, yam_token *tok);
+const char  *yam_scanner_error(yam_scanner *s);
+yam_mark     yam_scanner_error_mark(yam_scanner *s);
 void         yam_scanner_free(yam_scanner *s);
 
 /* ── Tag constants ───────────────────────────────────────── */
@@ -214,6 +220,8 @@ yam_status  yam_parse_next(yam_parser *p, yam_event *evt);
 void        yam_parser_set_schema(yam_parser *p, const yam_schema *schema);
 void        yam_parser_set_merge(yam_parser *p, bool enable);
 void        yam_parser_set_resolve(yam_parser *p, bool enable);
+const char *yam_parser_error(yam_parser *p);
+yam_mark    yam_parser_error_mark(yam_parser *p);
 void        yam_parser_free(yam_parser *p);
 
 /* ── Emitter ─────────────────────────────────────────────── */
