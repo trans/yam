@@ -1550,6 +1550,8 @@ static void atbl_add(merge_anchor_table *t, yam_str name, int start, int end) {
     t->entries[t->len++] = (merge_anchor){name, start, end};
 }
 
+/* TODO: linear scan — replace with a hash table if anchor-heavy inputs
+ * become a bottleneck (currently fine for typical anchor counts). */
 static merge_anchor *atbl_lookup(merge_anchor_table *t, yam_str name) {
     for (int i = t->len - 1; i >= 0; i--) {
         if (t->entries[i].name.len == name.len &&
@@ -2023,7 +2025,10 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
         return YAM_OK;
     }
 
-    /* if we haven't started, parse the entire stream eagerly into the queue */
+    /* TODO: eager parsing builds the full event queue on first call, which
+     * increases latency-to-first-event and peak memory for large documents.
+     * An incremental parser would improve both, but requires rethinking
+     * merge/alias resolution which currently needs the complete event array. */
     if (!p->stream_started) {
         yam_status st = parse_stream(p);
         if (st != YAM_OK) return st;

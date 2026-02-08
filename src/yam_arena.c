@@ -89,8 +89,11 @@ char *yam_arena_dup(yam_arena *a, const char *src, size_t len) {
     return dst;
 }
 
+/* TODO: retaining the largest block avoids re-allocation when input sizes
+ * are stable, but keeps peak memory after a one-time large parse.  Consider
+ * adding a cap parameter or a separate yam_arena_shrink() API. */
 void yam_arena_reset(yam_arena *a) {
-    /* free all blocks except the first allocated */
+    /* free all blocks except the largest */
     yam_block *b = a->blocks;
     yam_block *keep = NULL;
     size_t max_cap = 0;
