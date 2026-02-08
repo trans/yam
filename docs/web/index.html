@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YAM | YAML Parser and Emitter</title>
+  <meta name="description" content="YAM is a fast, minimal YAML 1.2 parser and emitter in C11 with SIMD scanning, event parser, and robust emitter.">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Rubik+Spray+Paint&display=swap');
+
+    @font-face {
+      font-family: "ComicNeueLocal";
+      src: url("./ComicNeue-Regular.ttf") format("truetype");
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "ComicNeueLocal";
+      src: url("./ComicNeue-Bold.ttf") format("truetype");
+      font-weight: 700;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    :root {
+      --bg-ink: #0b1d2b;
+      --bg-sea: #10324a;
+      --panel: #f5f1df;
+      --panel-ink: #112132;
+      --accent-spinach: #4d9f57;
+      --accent-gold: #d6a128;
+      --accent-coral: #d84f45;
+      --muted: #5f6c79;
+      --line: #1e3f59;
+      --shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+      --radius: 14px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      background:
+        radial-gradient(circle at 15% 8%, #2f5f83 0%, rgba(47, 95, 131, 0) 45%),
+        radial-gradient(circle at 85% 20%, #1f4d6b 0%, rgba(31, 77, 107, 0) 42%),
+        linear-gradient(180deg, var(--bg-sea), var(--bg-ink) 75%);
+      color: #e8edf2;
+      font-family: "Avenir Next Condensed", "Franklin Gothic Medium", "Trebuchet MS", sans-serif;
+      line-height: 1.45;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+                        linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+      background-size: 28px 28px;
+      opacity: 0.35;
+      z-index: 0;
+    }
+
+    .wrap {
+      position: relative;
+      z-index: 1;
+      width: min(1100px, 92vw);
+      margin: 0 auto;
+      padding-bottom: 3rem;
+    }
+
+    .hero {
+      padding: 2.25rem 0 1.25rem;
+      text-align: center;
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      line-height: 1.12;
+      font-family: "Impact", "Haettenschweiler", "Arial Narrow Bold", sans-serif;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      font-family: "Rubik Spray Paint", "ComicNeueLocal", "Comic Sans MS", "Comic Sans", cursive !important;
+      font-size: clamp(3.3rem, 8.8vw, 6.2rem);
+      margin-bottom: 0.2rem;
+      letter-spacing: 0.03em;
+      font-weight: 400;
+    }
+
+    .hero-caption {
+      margin: 0 auto 0.4rem;
+      color: #7ad57d;
+      font-size: 0.9rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-weight: 800;
+    }
+
+    .tag {
+      display: inline-block;
+      padding: 0.22rem 0.5rem;
+      border-radius: 999px;
+      border: 2px solid #1a3246;
+      background: #fff;
+      color: #0f2638;
+      font-size: 0.8rem;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      font-weight: 700;
+      margin-bottom: 0.55rem;
+    }
+
+    .lede {
+      font-size: 1.08rem;
+      margin: 0 auto;
+      max-width: 72ch;
+    }
+
+    .hero-image {
+      width: min(100%, 980px);
+      margin: 0 auto 0.75rem;
+      background: #ffffff;
+      border: 3px solid #ffffff;
+      border-radius: 20px;
+      padding: 12px;
+      box-shadow: var(--shadow);
+      transform: translateY(12px);
+      opacity: 0;
+      animation: enter 720ms ease-out 220ms forwards;
+    }
+
+    .hero-image img {
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 12px;
+      border: 2px solid #173851;
+    }
+
+    .stats {
+      margin-top: 1rem;
+      width: min(980px, 100%);
+      margin-left: auto;
+      margin-right: auto;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 0.7rem;
+    }
+
+    .stat {
+      background: #082034;
+      border: 2px solid #356483;
+      border-radius: 10px;
+      padding: 0.65rem 0.7rem;
+      text-align: center;
+    }
+
+    .stat strong {
+      display: block;
+      font-family: "Lucida Console", "Consolas", monospace;
+      color: #fff;
+      font-size: 1.14rem;
+    }
+
+    .stat span {
+      color: #b7c8d8;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .section {
+      margin-top: 1.1rem;
+      background: #082134;
+      border: 2px solid var(--line);
+      border-radius: var(--radius);
+      padding: 1.1rem;
+      box-shadow: var(--shadow);
+      opacity: 0;
+      transform: translateY(14px);
+      transition: opacity 500ms ease, transform 500ms ease;
+    }
+
+    .section.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .section h2 {
+      font-size: 1.5rem;
+      margin-bottom: 0.65rem;
+      color: #f4f6f8;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(240px, 1fr));
+      gap: 0.9rem;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(190px, 1fr));
+      gap: 0.8rem;
+    }
+
+    .tile {
+      border: 2px solid #3f6884;
+      border-radius: 12px;
+      padding: 0.85rem;
+      background: linear-gradient(165deg, rgba(243, 248, 252, 0.06), rgba(188, 212, 230, 0.03));
+    }
+
+    .tile h3 {
+      font-size: 1.06rem;
+      margin-bottom: 0.38rem;
+      color: #f0f8ff;
+    }
+
+    p {
+      margin: 0.1rem 0 0.5rem;
+      color: #d7e2ec;
+    }
+
+    .terminal {
+      margin: 0;
+      background: #04131f;
+      border: 2px solid #325a75;
+      border-radius: 12px;
+      color: #dce7f1;
+      padding: 0.9rem;
+      font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+      font-size: 0.9rem;
+      overflow-x: auto;
+    }
+
+    .accent-gold {
+      color: #ffe7a0;
+    }
+
+    .accent-green {
+      color: #b0efb8;
+    }
+
+    .fine-print {
+      float: right;
+      font-size: 0.76rem;
+      color: #a8bdcf;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin: 0;
+    }
+
+    .callout {
+      border-left: 5px solid var(--accent-spinach);
+      padding: 0.55rem 0.75rem;
+      background: rgba(77, 159, 87, 0.14);
+      border-radius: 8px;
+      margin-top: 0.7rem;
+    }
+
+    .flow {
+      display: grid;
+      gap: 0.6rem;
+      grid-template-columns: repeat(4, minmax(130px, 1fr));
+      margin-top: 0.55rem;
+    }
+
+    .flow div {
+      border: 2px solid #3b6683;
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 10px;
+      padding: 0.65rem;
+      text-align: center;
+      font-weight: 700;
+      color: #ebf1f6;
+      position: relative;
+    }
+
+    .flow div:not(:last-child)::after {
+      content: "->";
+      position: absolute;
+      right: -0.65rem;
+      top: 50%;
+      transform: translateY(-50%);
+      color: #7ec2f0;
+      font-weight: 900;
+    }
+
+    footer {
+      margin-top: 1.4rem;
+      text-align: center;
+      color: #b7c8d8;
+      font-size: 0.86rem;
+      letter-spacing: 0.03em;
+    }
+
+    @keyframes enter {
+      from {
+        opacity: 0;
+        transform: translateY(16px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media (max-width: 900px) {
+      .stats {
+        grid-template-columns: repeat(2, minmax(120px, 1fr));
+      }
+
+      .grid-2,
+      .grid-3 {
+        grid-template-columns: 1fr;
+      }
+
+      .flow {
+        grid-template-columns: 1fr;
+      }
+
+      .flow div:not(:last-child)::after {
+        content: "v";
+        right: auto;
+        left: 50%;
+        top: auto;
+        bottom: -0.8rem;
+        transform: translateX(-50%);
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <figure class="hero-image">
+        <img src="iyam.png" alt="Popeye style hero saying I YAM WHAT I YAM for the YAM YAML parser and emitter project">
+      </figure>
+      <h1>YAM</h1>
+      <p class="hero-caption">spinach-powered parsing</p>
+      <span class="tag">YAML 1.2 | C11</span>
+      <p class="lede">
+        A fast, minimal, zero-copy YAML parser and emitter with SIMD scanning,
+        event-driven parsing, merge and alias support, and dependable error reporting.
+      </p>
+      <div class="stats">
+        <div class="stat"><strong>363</strong><span>Suite Passes</span></div>
+        <div class="stat"><strong>663</strong><span>Total Tests</span></div>
+        <div class="stat"><strong>0</strong><span>Failures</span></div>
+        <div class="stat"><strong>382 MB/s<sup>*</sup></strong><span>Scanner Avg</span></div>
+      </div>
+    </header>
+
+    <section class="section reveal">
+      <h2>Build and Run</h2>
+      <p>Build with a C11 compiler (GCC/Clang tested on Linux and macOS).</p>
+      <pre class="terminal"><code>make              # build libyam.a
+make test-all     # run all tests
+make test-suite   # run YAML Test Suite (needs submodules)
+make bench        # scanner benchmark on your machine</code></pre>
+    </section>
+
+    <section class="section reveal">
+      <h2>Core Capabilities</h2>
+      <div class="grid-3">
+        <article class="tile">
+          <h3>Scanner</h3>
+          <p>SIMD-accelerated tokenization (SSE4.2 and NEON with scalar fallback), producing a flat token stream.</p>
+        </article>
+        <article class="tile">
+          <h3>Parser</h3>
+          <p>Event API with indent tracking, block structure handling, merge key expansion, alias resolution, and event safety limits.</p>
+        </article>
+        <article class="tile">
+          <h3>Emitter</h3>
+          <p>Roundtrip output in block, flow, or minimal style, with auto-quoting for ambiguous plain scalars.</p>
+        </article>
+      </div>
+      <div class="callout">
+        <strong class="accent-green">Schema support:</strong>
+        Failsafe, JSON, Core, or fully custom resolution rules.
+      </div>
+    </section>
+
+    <section class="section reveal">
+      <h2>Architecture</h2>
+      <p>YAM keeps scanner and parser responsibilities clean: raw tokens first, structure and properties in parser, then emit text.</p>
+      <div class="flow">
+        <div>Input Bytes</div>
+        <div>Scanner<br><span class="accent-gold">Tokens</span></div>
+        <div>Parser<br><span class="accent-gold">Events</span></div>
+        <div>Emitter</div>
+      </div>
+    </section>
+
+    <section class="section reveal">
+      <h2>Quick API Snapshot</h2>
+      <div class="grid-2">
+        <article class="tile">
+          <h3>Event Loop</h3>
+          <pre class="terminal"><code>yam_event evt;
+while (yam_parse_next(parser, &evt) == YAM_OK) {
+  if (evt.type == YAM_EVT_STREAM_END) break;
+  /* consume event */
+}</code></pre>
+        </article>
+        <article class="tile">
+          <h3>Error Reporting</h3>
+          <pre class="terminal"><code>const char *msg = yam_parser_error(p);
+yam_mark mark = yam_parser_error_mark(p);
+/* line, col, and message */</code></pre>
+        </article>
+      </div>
+    </section>
+
+    <section class="section reveal">
+      <h2>Performance and Reliability</h2>
+      <div class="grid-2">
+        <article class="tile">
+          <h3>Throughput (10 MB benchmark)*</h3>
+          <p><strong>Avg:</strong> 26.15 ms (<span class="accent-green">382.4 MB/s</span>)</p>
+          <p><strong>Best:</strong> 24.63 ms (<span class="accent-green">406.0 MB/s</span>)</p>
+          <p><strong>SIMD mode:</strong> SSE4.2 <span class="fine-print">* Intel Core Ultra 7 155H</span></p>
+        </article>
+        <article class="tile">
+          <h3>Test Status</h3>
+          <p>Passes 363 YAML Test Suite cases.</p>
+          <p>Project test count: <strong>663 total tests, 0 failures</strong>.</p>
+        </article>
+      </div>
+    </section>
+
+    <footer>
+      YAM | YAML parser and emitter in C11 | MIT license
+    </footer>
+  </div>
+
+  <script>
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          observer.unobserve(entry.target);
+        }
+      }
+    }, { threshold: 0.16 });
+
+    document.querySelectorAll('.reveal').forEach((el) => observer.observe(el));
+  </script>
+</body>
+</html>
