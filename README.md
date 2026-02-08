@@ -315,13 +315,13 @@ simple key resolution, and property (anchor/tag) attachment.
 
 ## Performance
 
-Scanner throughput on a 10 MB generated YAML document (AMD Zen, GCC -O2 -march=native):
+Scanner throughput on a 10 MB generated YAML document (GCC -O2 -march=native):
 
 ```
-  Run         Time (ms)     MB/s          Tokens
+  CPU                          Avg MB/s    Best MB/s
   ──────────────────────────────────────────────────
-  avg         26.15         382.4
-  best        24.63         406.0
+  Intel Core Ultra 7 155H      431         440
+  AMD Zen                      382         406
 
   SIMD: SSE4.2
 ```
