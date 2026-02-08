@@ -121,6 +121,39 @@
       margin-bottom: 0.55rem;
     }
 
+    .hero-pills {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.55rem;
+    }
+
+    .hero-pills .tag {
+      margin-bottom: 0;
+    }
+
+    .pill-link {
+      display: inline-block;
+      padding: 0.22rem 0.5rem;
+      border-radius: 999px;
+      border: 2px solid #5d95b8;
+      background: #0a2438;
+      color: #e7f4ff;
+      text-decoration: none;
+      font-size: 0.8rem;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+
+    .pill-link:hover {
+      color: #ffffff;
+      background: #12344f;
+      border-color: #9ed2f4;
+    }
+
     .lede {
       font-size: 1.08rem;
       margin: 0 auto;
@@ -350,7 +383,11 @@
       </figure>
       <h1>YAM</h1>
       <p class="hero-caption">spinach-powered parsing</p>
-      <span class="tag">YAML 1.2 | C11</span>
+      <div class="hero-pills">
+        <span class="tag">YAML 1.2 | C11</span>
+        <a class="pill-link" href="https://github.com/trans/yam">GitHub Repo</a>
+        <a class="pill-link" href="https://github.com/trans/yam/api/index.html">API Docs</a>
+      </div>
       <p class="lede">
         A fast, minimal, zero-copy YAML parser and emitter with SIMD scanning,
         event-driven parsing, merge and alias support, and dependable error reporting.
