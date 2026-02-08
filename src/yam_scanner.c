@@ -993,15 +993,20 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
         } else {
             /* auto-detect from first non-empty content line */
             base_indent = -1; /* sentinel: not yet detected */
+            int max_empty_indent = 0; /* longest whitespace-only line */
             size_t probe = s->pos;
             while (probe < s->len) {
                 int li = 0;
                 while (probe + li < s->len && s->buf[probe + li] == ' ') li++;
-                if (probe + li >= s->len) break;
+                if (probe + li >= s->len) {
+                    if (li > max_empty_indent) max_empty_indent = li;
+                    break;
+                }
                 /* document indicators terminate block scalar */
                 if (li == 0 && is_doc_indicator_at(s->buf, probe, s->len)) break;
                 if (yam_is_break((uint8_t)s->buf[probe + li])) {
-                    /* empty line — skip */
+                    /* empty line — track longest for indent detection */
+                    if (li > max_empty_indent) max_empty_indent = li;
                     probe += li;
                     if (probe < s->len && s->buf[probe] == '\r') probe++;
                     if (probe < s->len && s->buf[probe] == '\n') probe++;
@@ -1016,9 +1021,10 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
                 break;
             }
             if (base_indent < 0) {
-                /* no content lines found — use default */
-                base_indent = s->indent + 1;
-                if (base_indent < 1) base_indent = 1;
+                /* no content lines — use longest empty line (YAML 1.2 §8.1.2) */
+                int min_indent = s->indent + 1;
+                if (min_indent < 1) min_indent = 1;
+                base_indent = max_empty_indent > min_indent ? max_empty_indent : min_indent;
             }
         }
 

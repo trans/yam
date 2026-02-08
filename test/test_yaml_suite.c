@@ -78,9 +78,9 @@ static size_t unescape_yaml_special(const char *src, size_t srclen, char *dst, s
                 si += 3;
                 continue;
             }
-            /* ↵ (U+21B5) → CR */
+            /* ↵ (U+21B5) → visual newline marker, strip it (the actual
+             * newline is already present from the line break) */
             if (b1 == 0x86 && b2 == 0xB5) {
-                dst[di++] = '\r';
                 si += 3;
                 continue;
             }
@@ -191,6 +191,15 @@ static bool find_key_value(const char *text, size_t len, const char *key,
             pos + li + klen <= len &&
             memcmp(text + pos + li, key, klen) == 0) {
             *value_pos = pos + li + klen;
+            return true;
+        }
+
+        /* also match "- key" at col 0 (continuation entries) */
+        if (li == 0 && base_indent == 2 &&
+            pos + 2 + klen <= len &&
+            text[pos] == '-' && text[pos + 1] == ' ' &&
+            memcmp(text + pos + 2, key, klen) == 0) {
+            *value_pos = pos + 2 + klen;
             return true;
         }
 
@@ -475,8 +484,6 @@ typedef enum { RESULT_PASS, RESULT_FAIL, RESULT_ERROR, RESULT_SKIP } test_result
 static test_result run_test(test_case *tc, bool verbose) {
     size_t input_len = strlen(tc->yaml);
 
-    /* skip tests with no yaml content */
-    if (input_len == 0) return RESULT_SKIP;
     /* skip tests with no expected tree (unless fail test) */
     if (!tc->fail && strlen(tc->tree) == 0) return RESULT_SKIP;
 
