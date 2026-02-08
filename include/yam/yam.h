@@ -220,6 +220,7 @@ yam_status  yam_parse_next(yam_parser *p, yam_event *evt);
 void        yam_parser_set_schema(yam_parser *p, const yam_schema *schema);
 void        yam_parser_set_merge(yam_parser *p, bool enable);
 void        yam_parser_set_resolve(yam_parser *p, bool enable);
+void        yam_parser_set_max_events(yam_parser *p, int max);
 const char *yam_parser_error(yam_parser *p);
 yam_mark    yam_parser_error_mark(yam_parser *p);
 void        yam_parser_free(yam_parser *p);

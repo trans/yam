@@ -204,6 +204,22 @@ Scalar, mapping, and sequence aliases are all expanded. Circular and unknown
 references are kept as `ALIAS` events (no error, no infinite loop). Combines
 with merge keys when both are enabled.
 
+## Event Limit
+
+The parser defaults to a maximum of 10,000 events as a safety limit against
+runaway inputs. This is sufficient for typical config files (roughly
+100-200KB of dense YAML), but large documents may need a higher limit:
+
+```c
+yam_parser_set_max_events(parser, 100000);  /* raise for large files */
+yam_parser_set_max_events(parser, 0);       /* disable limit entirely */
+```
+
+Each YAML node produces 1-3 events (a key-value pair is ~2 events, plus
+structure start/end events), so the default 10,000 events handles roughly
+3,000-5,000 nodes. Documents with large string values use fewer events per
+byte and can go well beyond 200KB at the default limit.
+
 ## Error Handling
 
 Both the scanner and parser provide error messages with source locations:

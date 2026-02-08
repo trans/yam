@@ -2064,6 +2064,10 @@ void yam_parser_set_resolve(yam_parser *p, bool enable) {
     if (p) p->resolve_enabled = enable;
 }
 
+void yam_parser_set_max_events(yam_parser *p, int max) {
+    if (p) p->max_events = max;
+}
+
 const char *yam_parser_error(yam_parser *p) {
     if (!p || p->error_msg[0] == '\0') return NULL;
     return p->error_msg;
