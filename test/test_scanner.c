@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include <stdlib.h>
 
 #define GREEN "\033[32m"
 #define RED   "\033[31m"
@@ -297,6 +298,30 @@ static void test_yaml12_bool(void) {
     if (ok) PASS(); else FAIL("scanner should preserve 'yes' as plain scalar");
 }
 
+static void test_long_double_escape(void) {
+    TEST("long double-quoted \n escapes");
+    const int esc_count = 512; /* keeps test quick while stressing growth */
+    size_t in_len = (size_t)esc_count * 2 + 2; /* opening + closing quote */
+    char *input = malloc(in_len + 1);
+    if (!input) { FAIL("alloc"); return; }
+    input[0] = '"';
+    for (int i = 0; i < esc_count; i++) {
+        input[1 + i * 2] = '\\';
+        input[1 + i * 2 + 1] = 'N';
+    }
+    input[in_len - 1] = '"';
+    input[in_len] = '\0';
+
+    yam_token toks[4];
+    int n = scan_all(input, toks, 4);
+    bool ok = n >= 3 && toks[1].type == YAM_TOK_SCALAR;
+    size_t expected_len = (size_t)esc_count * 2; /* each \N → two UTF-8 bytes */
+    if (ok) ok = toks[1].value.len == expected_len;
+
+    free(input);
+    if (ok) PASS(); else FAIL("double-quoted growth failed");
+}
+
 /* ── Main ────────────────────────────────────────────────── */
 
 int main(void) {
@@ -317,6 +342,7 @@ int main(void) {
     test_colon_in_scalar();
     test_comment();
     test_yaml12_bool();
+    test_long_double_escape();
 
     printf("\n═══════════════════════════════════════════════════════════\n");
     printf("  %d/%d passed", tests_passed, tests_run);

@@ -1972,7 +1972,7 @@ yam_parser *yam_parser_new(const char *input, size_t len, yam_arena *a) {
 
     p->ctx_cap = 16;
     p->contexts = malloc(p->ctx_cap * sizeof(ctx_entry));
-    if (!p->contexts) { yam_scanner_free(p->scanner); free(p); return NULL; }
+    if (!p->contexts) { yam_scanner_free(p->scanner); free(p->events); free(p); return NULL; }
     p->ctx_len = 0;
 
     p->pending_anchor = YAM_STR_NULL;

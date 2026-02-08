@@ -535,7 +535,11 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
     size_t max_len = 0;
     size_t scan = s->pos;
     while (scan < s->len && s->buf[scan] != '"') {
-        if (s->buf[scan] == '\\') scan++; /* skip escaped char */
+        if (s->buf[scan] == '\\') {
+            if (scan + 1 < s->len && (s->buf[scan+1] == 'N' || s->buf[scan+1] == '_'))
+                max_len++; /* 2-byte UTF-8 output */
+            scan++; /* skip escaped char */
+        }
         scan++;
         max_len++;
     }
