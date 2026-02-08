@@ -455,9 +455,11 @@ while (yam_parse_next(parser, &evt) == YAM_OK) {
         </article>
         <article class="tile">
           <h3>Error Reporting</h3>
-          <pre class="terminal"><code>const char *msg = yam_parser_error(p);
-yam_mark mark = yam_parser_error_mark(p);
-/* line, col, and message */</code></pre>
+          <pre class="terminal"><code>if (yam_parse_next(parser, &evt) != YAM_OK) {
+  const char *msg = yam_parser_error(parser);
+  yam_mark mark = yam_parser_error_mark(parser);
+  printf("%d:%d: %s\n", mark.line, mark.col, msg);
+}</code></pre>
         </article>
       </div>
     </section>
@@ -473,7 +475,7 @@ yam_mark mark = yam_parser_error_mark(p);
         </article>
         <article class="tile">
           <h3>Test Status</h3>
-          <p>Passes 396 of 402 YAML Test Suite cases (6 have no expected output).</p>
+          <p>Passes 396 of 402 YAML Test Suite cases.<br/>(6 have no expected output).</p>
           <p>Project test count: <strong>663 total tests, 0 failures</strong>.</p>
         </article>
       </div>
