@@ -5,10 +5,9 @@ A YAML 1.2 parser and emitter written in C11. Fast, minimal, zero-copy.
 Features a SIMD-accelerated scanner (SSE4.2 / NEON with scalar fallback),
 an event-based parser, an emitter with block/flow/minimal output styles,
 merge key expansion, alias resolution, file input, structured error messages,
-and an arena allocator. Passes 363 of 406
-[YAML Test Suite](https://github.com/yaml/yaml-test-suite) cases
-(43 skipped due to missing expected output in the test suite).
-663 tests total, 0 failures.
+and an arena allocator. Zero failures on the
+[YAML Test Suite](https://github.com/yaml/yaml-test-suite) (363 pass,
+43 skipped -- those cases lack expected output in the test suite itself).
 
 ## Build
 
@@ -299,19 +298,15 @@ Rules are matched in order (first match wins). Match types: `YAM_MATCH_EXACT`,
 ## Architecture
 
 ```
-input bytes
-    |
-    v
- Scanner -----> flat token stream (SIMD-accelerated)
-    |
-    v
- Parser  -----> event stream (indent tracking, block structure)
-    |                          merge keys, alias resolution
-    v
- Emitter -----> YAML text (block / flow / minimal)
-    |
-    v
- Arena   -----> zero-copy string views into source + arena for decoded scalars
+ Input ──> Scanner ──> Parser ──> Emitter ──> Output
+               \          |          /
+                └─── Arena (memory) ─┘
+
+ Scanner : flat token stream (SIMD-accelerated)
+ Parser  : event stream (indent tracking, block structure,
+           merge keys, alias resolution)
+ Emitter : YAML text output (block / flow / minimal)
+ Arena   : bump allocator backing all components
 ```
 
 The scanner is intentionally "pure" -- it produces raw tokens without synthetic
