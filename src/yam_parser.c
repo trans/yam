@@ -73,6 +73,12 @@ struct yam_parser {
     /* schema (optional, for tag resolution) */
     const yam_schema *schema;
 
+    /* merge key resolution (opt-in) */
+    bool merge_enabled;
+
+    /* alias resolution (opt-in) */
+    bool resolve_enabled;
+
     /* safety limit */
     int max_events;
 };
@@ -1464,6 +1470,468 @@ static yam_status parse_stream(yam_parser *p) {
     }
 }
 
+/* ── Merge key resolution ────────────────────────────────── */
+
+/* Compute the exclusive end index for the node starting at idx */
+static int node_end(const yam_event *events, int len, int idx) {
+    yam_event_type t = events[idx].type;
+    if (t == YAM_EVT_SCALAR || t == YAM_EVT_ALIAS)
+        return idx + 1;
+    if (t == YAM_EVT_MAPPING_START || t == YAM_EVT_SEQUENCE_START) {
+        yam_event_type end_t = (t == YAM_EVT_MAPPING_START)
+            ? YAM_EVT_MAPPING_END : YAM_EVT_SEQUENCE_END;
+        int depth = 1;
+        for (int j = idx + 1; j < len; j++) {
+            if (events[j].type == t) depth++;
+            else if (events[j].type == end_t && --depth == 0) return j + 1;
+        }
+    }
+    return idx + 1;
+}
+
+/* Anchor table */
+typedef struct {
+    yam_str name;
+    int     start;  /* index of anchored node */
+    int     end;    /* exclusive end */
+} merge_anchor;
+
+typedef struct {
+    merge_anchor *entries;
+    int           len;
+    int           cap;
+} merge_anchor_table;
+
+static void atbl_init(merge_anchor_table *t) {
+    t->entries = NULL; t->len = 0; t->cap = 0;
+}
+
+static void atbl_free(merge_anchor_table *t) {
+    free(t->entries);
+    t->entries = NULL; t->len = 0; t->cap = 0;
+}
+
+static void atbl_add(merge_anchor_table *t, yam_str name, int start, int end) {
+    if (t->len >= t->cap) {
+        int nc = t->cap ? t->cap * 2 : 16;
+        merge_anchor *ne = realloc(t->entries, nc * sizeof(merge_anchor));
+        if (!ne) return;
+        t->entries = ne; t->cap = nc;
+    }
+    t->entries[t->len++] = (merge_anchor){name, start, end};
+}
+
+static merge_anchor *atbl_lookup(merge_anchor_table *t, yam_str name) {
+    for (int i = t->len - 1; i >= 0; i--) {
+        if (t->entries[i].name.len == name.len &&
+            memcmp(t->entries[i].name.data, name.data, name.len) == 0)
+            return &t->entries[i];
+    }
+    return NULL;
+}
+
+static void atbl_build(merge_anchor_table *t, const yam_event *events, int len) {
+    atbl_init(t);
+    for (int i = 0; i < len; i++) {
+        if (events[i].anchor.data && events[i].anchor.len > 0) {
+            int end = node_end(events, len, i);
+            atbl_add(t, events[i].anchor, i, end);
+        }
+    }
+}
+
+/* Dynamic event array for building output */
+typedef struct {
+    yam_event *data;
+    int        len;
+    int        cap;
+} evt_buf;
+
+static void ebuf_init(evt_buf *b, int cap) {
+    b->data = malloc(cap * sizeof(yam_event));
+    b->len = 0;
+    b->cap = cap;
+}
+
+static void ebuf_free(evt_buf *b) {
+    free(b->data);
+    b->data = NULL; b->len = 0; b->cap = 0;
+}
+
+static void ebuf_push(evt_buf *b, yam_event e) {
+    if (b->len >= b->cap) {
+        int nc = b->cap * 2;
+        yam_event *nd = realloc(b->data, nc * sizeof(yam_event));
+        if (!nd) return;
+        b->data = nd; b->cap = nc;
+    }
+    b->data[b->len++] = e;
+}
+
+static void ebuf_push_range(evt_buf *b, const yam_event *events, int start, int end) {
+    for (int i = start; i < end; i++)
+        ebuf_push(b, events[i]);
+}
+
+/* Key set for tracking seen keys (override semantics) */
+typedef struct {
+    yam_str *keys;
+    int      len;
+    int      cap;
+} key_set;
+
+static void kset_init(key_set *ks) {
+    ks->keys = NULL; ks->len = 0; ks->cap = 0;
+}
+
+static void kset_free(key_set *ks) {
+    free(ks->keys);
+    ks->keys = NULL; ks->len = 0; ks->cap = 0;
+}
+
+static bool kset_contains(const key_set *ks, yam_str key) {
+    for (int i = 0; i < ks->len; i++) {
+        if (ks->keys[i].len == key.len &&
+            memcmp(ks->keys[i].data, key.data, key.len) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void kset_add(key_set *ks, yam_str key) {
+    if (kset_contains(ks, key)) return;
+    if (ks->len >= ks->cap) {
+        int nc = ks->cap ? ks->cap * 2 : 16;
+        yam_str *nk = realloc(ks->keys, nc * sizeof(yam_str));
+        if (!nk) return;
+        ks->keys = nk; ks->cap = nc;
+    }
+    ks->keys[ks->len++] = key;
+}
+
+static bool is_merge_key(const yam_event *evt) {
+    return evt->type == YAM_EVT_SCALAR
+        && evt->scalar_style == YAM_SCALAR_PLAIN
+        && evt->value.len == 2
+        && evt->value.data[0] == '<' && evt->value.data[1] == '<';
+}
+
+/* Merge key-value pairs from a source mapping into buf, skipping already-seen keys */
+static void merge_from_mapping(const yam_event *events, int evt_len,
+                               int map_start, int map_end,
+                               evt_buf *out, key_set *seen) {
+    /* iterate key-value pairs inside the mapping (skip MAPPING_START/END) */
+    int pos = map_start + 1;
+    while (pos < map_end - 1) {
+        int key_start = pos;
+        int key_end = node_end(events, evt_len, pos);
+        int val_start = key_end;
+        int val_end = node_end(events, evt_len, val_start);
+
+        /* only scalar keys participate in override checking */
+        bool is_scalar_key = (key_end - key_start == 1 &&
+                              events[key_start].type == YAM_EVT_SCALAR);
+        bool skip = false;
+        if (is_scalar_key) {
+            yam_str kv = events[key_start].value;
+            if (kset_contains(seen, kv)) {
+                skip = true;
+            } else {
+                kset_add(seen, kv);
+            }
+        }
+
+        if (!skip) {
+            /* copy key events, stripping anchors from top-level */
+            for (int j = key_start; j < key_end; j++) {
+                yam_event copy = events[j];
+                if (j == key_start) copy.anchor = YAM_STR_NULL;
+                ebuf_push(out, copy);
+            }
+            /* copy value events */
+            for (int j = val_start; j < val_end; j++) {
+                yam_event copy = events[j];
+                if (j == val_start) copy.anchor = YAM_STR_NULL;
+                ebuf_push(out, copy);
+            }
+        }
+
+        pos = val_end;
+    }
+}
+
+/* Process a single merge value (ALIAS or SEQUENCE of aliases) */
+static void process_merge_value(const yam_event *events, int evt_len,
+                                int val_start, int val_end,
+                                merge_anchor_table *anchors,
+                                evt_buf *out, key_set *seen) {
+    if (events[val_start].type == YAM_EVT_ALIAS) {
+        /* <<: *alias */
+        merge_anchor *a = atbl_lookup(anchors, events[val_start].value);
+        if (a && events[a->start].type == YAM_EVT_MAPPING_START) {
+            merge_from_mapping(events, evt_len, a->start, a->end, out, seen);
+        }
+    } else if (events[val_start].type == YAM_EVT_SEQUENCE_START) {
+        /* <<: [*a, *b, ...] */
+        int pos = val_start + 1;
+        int seq_end = val_end - 1; /* SEQUENCE_END */
+        while (pos < seq_end) {
+            if (events[pos].type == YAM_EVT_ALIAS) {
+                merge_anchor *a = atbl_lookup(anchors, events[pos].value);
+                if (a && events[a->start].type == YAM_EVT_MAPPING_START) {
+                    merge_from_mapping(events, evt_len, a->start, a->end,
+                                       out, seen);
+                }
+                pos++;
+            } else {
+                pos = node_end(events, evt_len, pos);
+            }
+        }
+    }
+    /* other value types (scalar, mapping) — silently ignored */
+}
+
+static yam_status resolve_merges(yam_parser *p) {
+    #define MAX_MERGE_PASSES 32
+
+    for (int pass = 0; pass < MAX_MERGE_PASSES; pass++) {
+        merge_anchor_table anchors;
+        atbl_build(&anchors, p->events, p->evt_len);
+
+        evt_buf out;
+        ebuf_init(&out, p->evt_len * 2);
+        bool changed = false;
+
+        int i = 0;
+        while (i < p->evt_len) {
+            if (p->events[i].type != YAM_EVT_MAPPING_START) {
+                ebuf_push(&out, p->events[i]);
+                i++;
+                continue;
+            }
+
+            /* found a mapping — find its end */
+            int map_start = i;
+            int map_end = node_end(p->events, p->evt_len, i);
+
+            /* check if this mapping has any merge keys */
+            bool has_merge = false;
+            {
+                int pos = map_start + 1;
+                while (pos < map_end - 1) {
+                    int ke = node_end(p->events, p->evt_len, pos);
+                    if (is_merge_key(&p->events[pos])) { has_merge = true; break; }
+                    int ve = node_end(p->events, p->evt_len, ke);
+                    pos = ve;
+                }
+            }
+
+            if (!has_merge) {
+                /* no merge keys at this level — just push MAPPING_START
+                 * and let the loop continue to process inner events
+                 * (which may contain nested mappings with merge keys) */
+                ebuf_push(&out, p->events[i]);
+                i++;
+                continue;
+            }
+
+            /* this mapping has merges — rebuild it */
+            changed = true;
+
+            /* first collect explicit (non-merge) keys */
+            key_set seen;
+            kset_init(&seen);
+
+            /* pass 1: record all explicit keys */
+            {
+                int pos = map_start + 1;
+                while (pos < map_end - 1) {
+                    int key_start = pos;
+                    int key_end = node_end(p->events, p->evt_len, pos);
+                    int val_end = node_end(p->events, p->evt_len, key_end);
+
+                    if (!is_merge_key(&p->events[key_start])) {
+                        if (key_end - key_start == 1 &&
+                            p->events[key_start].type == YAM_EVT_SCALAR) {
+                            kset_add(&seen, p->events[key_start].value);
+                        }
+                    }
+                    pos = val_end;
+                }
+            }
+
+            /* emit MAPPING_START */
+            ebuf_push(&out, p->events[map_start]);
+
+            /* pass 2: emit explicit pairs first */
+            {
+                int pos = map_start + 1;
+                while (pos < map_end - 1) {
+                    int key_start = pos;
+                    int key_end = node_end(p->events, p->evt_len, pos);
+                    int val_end = node_end(p->events, p->evt_len, key_end);
+
+                    if (!is_merge_key(&p->events[key_start])) {
+                        ebuf_push_range(&out, p->events, key_start, val_end);
+                    }
+                    pos = val_end;
+                }
+            }
+
+            /* pass 3: process merge keys in order, injecting non-duplicate pairs */
+            {
+                int pos = map_start + 1;
+                while (pos < map_end - 1) {
+                    int key_start = pos;
+                    int key_end = node_end(p->events, p->evt_len, pos);
+                    int val_start = key_end;
+                    int val_end = node_end(p->events, p->evt_len, key_end);
+
+                    if (is_merge_key(&p->events[key_start])) {
+                        process_merge_value(p->events, p->evt_len,
+                                            val_start, val_end,
+                                            &anchors, &out, &seen);
+                    }
+                    pos = val_end;
+                }
+            }
+
+            /* emit MAPPING_END */
+            ebuf_push(&out, p->events[map_end - 1]);
+
+            kset_free(&seen);
+            i = map_end;
+        }
+
+        atbl_free(&anchors);
+
+        if (!changed) {
+            ebuf_free(&out);
+            break;
+        }
+
+        /* replace event array */
+        free(p->events);
+        p->events = out.data;
+        p->evt_len = out.len;
+        p->evt_cap = out.cap;
+        p->evt_cursor = 0;
+        /* don't free out — ownership transferred */
+    }
+
+    return YAM_OK;
+    #undef MAX_MERGE_PASSES
+}
+
+/* ── Alias resolution ────────────────────────────────────── */
+
+enum { ACYCLE_WHITE = 0, ACYCLE_GRAY = 1, ACYCLE_BLACK = 2 };
+
+static bool alias_has_cycle(int idx, merge_anchor_table *t, int *color,
+                            const yam_event *events) {
+    color[idx] = ACYCLE_GRAY;
+    for (int j = t->entries[idx].start; j < t->entries[idx].end; j++) {
+        if (events[j].type != YAM_EVT_ALIAS) continue;
+        for (int k = 0; k < t->len; k++) {
+            if (t->entries[k].name.len == events[j].value.len &&
+                memcmp(t->entries[k].name.data, events[j].value.data,
+                       events[j].value.len) == 0) {
+                if (color[k] == ACYCLE_GRAY) return true;
+                if (color[k] == ACYCLE_WHITE &&
+                    alias_has_cycle(k, t, color, events))
+                    return true;
+            }
+        }
+    }
+    color[idx] = ACYCLE_BLACK;
+    return false;
+}
+
+static bool is_cyclic_name(merge_anchor_table *t, bool *cyclic, yam_str name) {
+    for (int i = 0; i < t->len; i++) {
+        if (t->entries[i].name.len == name.len &&
+            memcmp(t->entries[i].name.data, name.data, name.len) == 0)
+            return cyclic[i];
+    }
+    return false;
+}
+
+static yam_status resolve_aliases(yam_parser *p) {
+    /* build initial anchor table for cycle detection */
+    merge_anchor_table anchors;
+    atbl_build(&anchors, p->events, p->evt_len);
+
+    if (anchors.len == 0) {
+        atbl_free(&anchors);
+        return YAM_OK;
+    }
+
+    /* detect cycles via DFS */
+    int *color = calloc(anchors.len, sizeof(int));
+    bool *cyclic = calloc(anchors.len, sizeof(bool));
+    if (!color || !cyclic) {
+        free(color); free(cyclic);
+        atbl_free(&anchors);
+        return YAM_ERR_MEMORY;
+    }
+
+    for (int i = 0; i < anchors.len; i++) {
+        if (color[i] == ACYCLE_WHITE) {
+            if (alias_has_cycle(i, &anchors, color, p->events)) {
+                for (int k = 0; k < anchors.len; k++)
+                    if (color[k] == ACYCLE_GRAY) cyclic[k] = true;
+            }
+        }
+    }
+    atbl_free(&anchors);
+
+    /* expand non-cyclic aliases in passes */
+    for (int pass = 0; pass < 32; pass++) {
+        atbl_build(&anchors, p->events, p->evt_len);
+
+        evt_buf out;
+        ebuf_init(&out, p->evt_len * 2);
+        bool changed = false;
+
+        for (int i = 0; i < p->evt_len; i++) {
+            if (p->events[i].type != YAM_EVT_ALIAS) {
+                ebuf_push(&out, p->events[i]);
+                continue;
+            }
+
+            merge_anchor *a = atbl_lookup(&anchors, p->events[i].value);
+            if (!a || is_cyclic_name(&anchors, cyclic, p->events[i].value)) {
+                ebuf_push(&out, p->events[i]);
+                continue;
+            }
+
+            changed = true;
+            for (int j = a->start; j < a->end; j++) {
+                yam_event copy = p->events[j];
+                if (j == a->start) copy.anchor = YAM_STR_NULL;
+                ebuf_push(&out, copy);
+            }
+        }
+
+        atbl_free(&anchors);
+
+        if (!changed) {
+            ebuf_free(&out);
+            break;
+        }
+
+        free(p->events);
+        p->events = out.data;
+        p->evt_len = out.len;
+        p->evt_cap = out.cap;
+        p->evt_cursor = 0;
+    }
+
+    free(color);
+    free(cyclic);
+    return YAM_OK;
+}
+
 /* ── Public API ──────────────────────────────────────────── */
 
 yam_parser *yam_parser_new(const char *input, size_t len, yam_arena *a) {
@@ -1494,6 +1962,8 @@ yam_parser *yam_parser_new(const char *input, size_t len, yam_arena *a) {
     p->stream_started = false;
     p->stream_ended = false;
     p->doc_open = false;
+    p->merge_enabled = false;
+    p->resolve_enabled = false;
     p->max_events = 10000; /* safety limit */
 
     return p;
@@ -1513,6 +1983,15 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
         yam_status st = parse_stream(p);
         if (st != YAM_OK) return st;
 
+        if (p->merge_enabled) {
+            st = resolve_merges(p);
+            if (st != YAM_OK) return st;
+        }
+        if (p->resolve_enabled) {
+            st = resolve_aliases(p);
+            if (st != YAM_OK) return st;
+        }
+
         if (dequeue(p, evt)) return YAM_OK;
         *evt = evt_simple(YAM_EVT_NONE);
         return YAM_OK;
@@ -1525,6 +2004,14 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
 
 void yam_parser_set_schema(yam_parser *p, const yam_schema *schema) {
     if (p) p->schema = schema;
+}
+
+void yam_parser_set_merge(yam_parser *p, bool enable) {
+    if (p) p->merge_enabled = enable;
+}
+
+void yam_parser_set_resolve(yam_parser *p, bool enable) {
+    if (p) p->resolve_enabled = enable;
 }
 
 void yam_parser_free(yam_parser *p) {

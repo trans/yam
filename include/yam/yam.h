@@ -156,6 +156,7 @@ extern const yam_str YAM_TAG_FLOAT;   /* tag:yaml.org,2002:float */
 extern const yam_str YAM_TAG_STR;     /* tag:yaml.org,2002:str   */
 extern const yam_str YAM_TAG_SEQ;     /* tag:yaml.org,2002:seq   */
 extern const yam_str YAM_TAG_MAP;     /* tag:yaml.org,2002:map   */
+extern const yam_str YAM_TAG_MERGE;  /* tag:yaml.org,2002:merge */
 
 /* ── Schema ──────────────────────────────────────────────── */
 
@@ -211,6 +212,8 @@ typedef struct yam_parser yam_parser;
 yam_parser *yam_parser_new(const char *input, size_t len, yam_arena *a);
 yam_status  yam_parse_next(yam_parser *p, yam_event *evt);
 void        yam_parser_set_schema(yam_parser *p, const yam_schema *schema);
+void        yam_parser_set_merge(yam_parser *p, bool enable);
+void        yam_parser_set_resolve(yam_parser *p, bool enable);
 void        yam_parser_free(yam_parser *p);
 
 /* ── Emitter ─────────────────────────────────────────────── */

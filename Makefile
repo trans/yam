@@ -19,8 +19,10 @@ TEST    := $(OBJDIR)/test_scanner
 TEST_SUITE := $(OBJDIR)/test_yaml_suite
 TEST_SCHEMA := $(OBJDIR)/test_schema
 TEST_EMITTER := $(OBJDIR)/test_emitter
+TEST_MERGE := $(OBJDIR)/test_merge
+TEST_RESOLVE := $(OBJDIR)/test_resolve
 
-.PHONY: all clean test test-suite test-schema test-emitter test-all bench
+.PHONY: all clean test test-suite test-schema test-emitter test-merge test-resolve test-all bench
 
 all: $(LIB) $(TEST)
 
@@ -51,6 +53,12 @@ $(TEST_SCHEMA): $(TESTDIR)/test_schema.c $(LIB)
 $(TEST_EMITTER): $(TESTDIR)/test_emitter.c $(LIB)
 	$(CC) $(CFLAGS) $< -L$(OBJDIR) -lyam -o $@
 
+$(TEST_MERGE): $(TESTDIR)/test_merge.c $(LIB)
+	$(CC) $(CFLAGS) $< -L$(OBJDIR) -lyam -o $@
+
+$(TEST_RESOLVE): $(TESTDIR)/test_resolve.c $(LIB)
+	$(CC) $(CFLAGS) $< -L$(OBJDIR) -lyam -o $@
+
 test: $(TEST)
 	@echo "─── Running scanner tests ───"
 	@./$(TEST)
@@ -67,7 +75,15 @@ test-emitter: $(TEST_EMITTER)
 	@echo "─── Running emitter tests ───"
 	@./$(TEST_EMITTER)
 
-test-all: test test-suite test-schema test-emitter
+test-merge: $(TEST_MERGE)
+	@echo "─── Running merge key tests ───"
+	@./$(TEST_MERGE)
+
+test-resolve: $(TEST_RESOLVE)
+	@echo "─── Running resolve tests ───"
+	@./$(TEST_RESOLVE)
+
+test-all: test test-suite test-schema test-emitter test-merge test-resolve
 
 bench: $(OBJDIR)/bench_scanner
 	@./$(OBJDIR)/bench_scanner $(SIZE)

@@ -25,6 +25,7 @@ static const char TAG_FLOAT[] = "tag:yaml.org,2002:float";
 static const char TAG_STR[]   = "tag:yaml.org,2002:str";
 static const char TAG_SEQ[]   = "tag:yaml.org,2002:seq";
 static const char TAG_MAP[]   = "tag:yaml.org,2002:map";
+static const char TAG_MERGE[] = "tag:yaml.org,2002:merge";
 
 const yam_str YAM_TAG_NULL  = { TAG_NULL,  sizeof(TAG_NULL)  - 1 };
 const yam_str YAM_TAG_BOOL  = { TAG_BOOL,  sizeof(TAG_BOOL)  - 1 };
@@ -33,6 +34,7 @@ const yam_str YAM_TAG_FLOAT = { TAG_FLOAT, sizeof(TAG_FLOAT) - 1 };
 const yam_str YAM_TAG_STR   = { TAG_STR,   sizeof(TAG_STR)   - 1 };
 const yam_str YAM_TAG_SEQ   = { TAG_SEQ,   sizeof(TAG_SEQ)   - 1 };
 const yam_str YAM_TAG_MAP   = { TAG_MAP,   sizeof(TAG_MAP)   - 1 };
+const yam_str YAM_TAG_MERGE = { TAG_MERGE, sizeof(TAG_MERGE) - 1 };
 
 /* ── Built-in procedural matchers ────────────────────────── */
 
