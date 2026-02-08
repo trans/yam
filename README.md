@@ -154,8 +154,6 @@ Configure with `yam_emit_opts`:
 yam_emit_opts opts = {
     .style   = YAM_EMIT_BLOCK,
     .indent  = 2,      /* spaces per indent level */
-    .width   = 80,     /* line width hint */
-    .unicode = true,   /* allow non-ASCII unescaped */
 };
 yam_emitter *e = yam_emitter_new(opts, arena);
 ```

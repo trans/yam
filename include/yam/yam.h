@@ -237,11 +237,9 @@ typedef enum {
 typedef struct {
     yam_emit_style style;
     int            indent;       /* spaces per indent level, default 2 */
-    int            width;        /* line width hint, default 80 */
-    bool           unicode;      /* allow non-ASCII unescaped */
 } yam_emit_opts;
 
-#define YAM_EMIT_OPTS_DEFAULT ((yam_emit_opts){YAM_EMIT_BLOCK, 2, 80, true})
+#define YAM_EMIT_OPTS_DEFAULT ((yam_emit_opts){YAM_EMIT_BLOCK, 2})
 
 yam_emitter *yam_emitter_new(yam_emit_opts opts, yam_arena *a);
 yam_status   yam_emit(yam_emitter *e, const yam_event *evt);
