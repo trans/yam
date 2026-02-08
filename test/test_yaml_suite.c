@@ -29,6 +29,7 @@ typedef struct {
     char yaml[8192];  /* input YAML */
     char tree[8192];  /* expected event tree */
     bool fail;        /* expect parse error */
+    bool skip;        /* explicitly skipped by test suite */
     int  index;       /* sub-test index (0-based) */
 } test_case;
 
@@ -285,6 +286,20 @@ static int parse_test_file(const char *path, const char *id, test_case *cases, i
             memcmp(text + entry_start, "- fail: true", 12) == 0 &&
             (text[entry_start + 12] == '\n' || text[entry_start + 12] == '\r')) {
             tc->fail = true;
+        }
+
+        /* check for skip: true (applies to all cases in the file) */
+        if (find_key_value(text, entry_end, "skip: true", base_indent, entry_start, &vpos)) {
+            tc->skip = true;
+        }
+        if (!tc->skip && entry_start + 13 <= entry_end &&
+            memcmp(text + entry_start, "- skip: true", 12) == 0 &&
+            (text[entry_start + 12] == '\n' || text[entry_start + 12] == '\r')) {
+            tc->skip = true;
+        }
+        /* propagate skip from first entry to all subsequent entries */
+        if (count > 0 && cases[0].skip) {
+            tc->skip = true;
         }
 
         /* extract name */
@@ -645,6 +660,8 @@ int main(int argc, char **argv) {
 
         for (int i = 0; i < ncases; i++) {
             test_case *tc = &cases[i];
+            /* skip: true cases are excluded from the official suite */
+            if (tc->skip) continue;
             total++;
 
             test_result result = run_test(tc, verbose);
