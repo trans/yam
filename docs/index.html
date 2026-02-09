@@ -408,7 +408,8 @@
         <div class="stat"><strong>396/402</strong><span>Suite Passes</span></div>
         <div class="stat"><strong>663</strong><span>Total Tests</span></div>
         <div class="stat"><strong>0</strong><span>Failures</span></div>
-        <div class="stat"><strong>382 MB/s<sup>*</sup></strong><span>Scanner Avg</span></div>
+        <div class="stat"><strong>423 MB/s<sup>*</sup></strong><span>Scanner</span></div>
+        <div class="stat"><strong>172 MB/s<sup>*</sup></strong><span>Parser Avg</span></div>
       </div>
     </header>
 
@@ -481,9 +482,9 @@ while (yam_parse_next(parser, &evt) == YAM_OK) {
       <div class="grid-2">
         <article class="tile">
           <h3>Throughput (10 MB benchmark)*</h3>
-          <p><strong>Avg:</strong> 26.15 ms (<span class="accent-green">382.4 MB/s</span>)</p>
-          <p><strong>Best:</strong> 24.63 ms (<span class="accent-green">406.0 MB/s</span>)</p>
-          <p><strong>SIMD mode:</strong> SSE4.2 <span class="fine-print">* Intel Core Ultra 7 155H</span></p>
+          <p><strong>Scanner:</strong> <span class="accent-green">423 MB/s</span> avg, 425 MB/s best</p>
+          <p><strong>Parser:</strong> <span class="accent-green">172 MB/s</span> avg across block, mixed, and JSON</p>
+          <p><strong>SIMD:</strong> SSE4.2 <span class="fine-print">* Intel Core Ultra 7 155H</span></p>
         </article>
         <article class="tile">
           <h3>Test Status</h3>
