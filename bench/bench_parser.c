@@ -13,9 +13,10 @@
 #include <string.h>
 #include <time.h>
 
-/* ── Generate a realistic YAML document ──────────────────── */
+/* ── Generate YAML documents ─────────────────────────────── */
 
-static char *generate_yaml(size_t target_size, size_t *out_len) {
+/* Mixed YAML: mappings, sequences, flow collections, quoted strings */
+static char *generate_mixed_yaml(size_t target_size, size_t *out_len) {
     char *buf = (char *)malloc(target_size + 4096);
     if (!buf) return NULL;
 
@@ -48,6 +49,33 @@ static char *generate_yaml(size_t target_size, size_t *out_len) {
     }
 
     pos += sprintf(buf + pos, "...\n");
+    *out_len = pos;
+    return buf;
+}
+
+/* Pure block YAML: only mappings and sequences, no flow or quotes */
+static char *generate_block_yaml(size_t target_size, size_t *out_len) {
+    char *buf = (char *)malloc(target_size + 4096);
+    if (!buf) return NULL;
+
+    size_t pos = 0;
+    int item = 0;
+
+    while (pos < target_size) {
+        pos += sprintf(buf + pos,
+            "- id: %d\n"
+            "  name: item-%d\n"
+            "  value: %d\n"
+            "  nested:\n"
+            "    x: %d\n"
+            "    y: %d\n",
+            item, item,
+            item * 17 % 1000,
+            item * 7 % 500, item * 13 % 500
+        );
+        item++;
+    }
+
     *out_len = pos;
     return buf;
 }
@@ -113,30 +141,15 @@ static double bench_libyaml(const char *input, size_t len, int *event_count) {
 }
 #endif
 
-/* ── Main ────────────────────────────────────────────────── */
+/* ── Run one benchmark ───────────────────────────────────── */
 
-int main(int argc, char **argv) {
-    size_t target_mb = 10;
-    if (argc > 1) target_mb = atoi(argv[1]);
-    if (target_mb < 1) target_mb = 1;
-    if (target_mb > 100) target_mb = 100;
-
-    size_t target_size = target_mb * 1024 * 1024;
-
-    printf("\nyam parser benchmark\n");
-    printf("═══════════════════════════════════════════════════════════\n\n");
-
-    printf("  Generating %zu MB YAML document...\n", target_mb);
-    size_t len;
-    char *yaml = generate_yaml(target_size, &len);
-    if (!yaml) { fprintf(stderr, "allocation failed\n"); return 1; }
-    printf("  Generated: %.2f MB (%zu bytes)\n\n", len / (1024.0 * 1024.0), len);
+static void run_bench(const char *label, char *yaml, size_t len) {
+    printf("  %s: %.2f MB (%zu bytes)\n\n", label, len / (1024.0 * 1024.0), len);
 
     /* warmup */
     int events;
     bench_yam(yaml, len, &events);
 
-    /* benchmark: 5 iterations */
     int iterations = 5;
     double total = 0;
     double best = 1e9;
@@ -160,23 +173,8 @@ int main(int argc, char **argv) {
 
     printf("  ──────────────────────────────────────────────────\n");
     printf("  avg         %-12.2f  %-12.1f\n", avg * 1000, avg_mbps);
-    printf("  best        %-12.2f  %-12.1f\n", best * 1000, best_mbps);
+    printf("  best        %-12.2f  %-12.1f\n\n", best * 1000, best_mbps);
 
-    printf("\n");
-
-#if defined(__SSE4_2__)
-    printf("  SIMD: SSE4.2 ✓\n");
-#elif defined(__SSE2__)
-    printf("  SIMD: SSE2 (no SSE4.2)\n");
-#elif defined(__ARM_NEON)
-    printf("  SIMD: NEON ✓\n");
-#else
-    printf("  SIMD: none (scalar fallback)\n");
-#endif
-
-    printf("\n");
-
-    /* ── libyaml comparison ──────────────────────────────── */
 #ifdef HAS_LIBYAML
     printf("  libyaml comparison:\n");
     printf("  %-10s  %-12s  %-12s  %-10s\n", "Run", "Time (ms)", "MB/s", "Events");
@@ -203,7 +201,43 @@ int main(int argc, char **argv) {
     printf("  avg         %-12.2f  %-12.1f\n", avg * 1000, avg_mbps);
     printf("  best        %-12.2f  %-12.1f\n\n", best * 1000, best_mbps);
 #endif
+}
 
+/* ── Main ────────────────────────────────────────────────── */
+
+int main(int argc, char **argv) {
+    size_t target_mb = 10;
+    if (argc > 1) target_mb = atoi(argv[1]);
+    if (target_mb < 1) target_mb = 1;
+    if (target_mb > 100) target_mb = 100;
+
+    size_t target_size = target_mb * 1024 * 1024;
+
+    printf("\nyam parser benchmark (%zu MB)\n", target_mb);
+    printf("═══════════════════════════════════════════════════════════\n\n");
+
+#if defined(__SSE4_2__)
+    printf("  SIMD: SSE4.2\n\n");
+#elif defined(__SSE2__)
+    printf("  SIMD: SSE2 (no SSE4.2)\n\n");
+#elif defined(__ARM_NEON)
+    printf("  SIMD: NEON\n\n");
+#else
+    printf("  SIMD: none (scalar fallback)\n\n");
+#endif
+
+    /* ── Pure block YAML (incremental parser) ──────────── */
+    size_t len;
+    char *yaml = generate_block_yaml(target_size, &len);
+    if (!yaml) { fprintf(stderr, "allocation failed\n"); return 1; }
+    run_bench("Pure block YAML", yaml, len);
     free(yaml);
+
+    /* ── Mixed YAML (flow + quotes → eager fallback) ───── */
+    yaml = generate_mixed_yaml(target_size, &len);
+    if (!yaml) { fprintf(stderr, "allocation failed\n"); return 1; }
+    run_bench("Mixed YAML (flow + quotes)", yaml, len);
+    free(yaml);
+
     return 0;
 }
