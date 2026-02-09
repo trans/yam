@@ -315,16 +315,20 @@ simple key resolution, and property (anchor/tag) attachment.
 
 ## Performance
 
-Scanner throughput on a 10 MB generated YAML document (GCC -O2 -march=native):
+Throughput on a 10 MB generated YAML document (GCC -O2 -march=native, SSE4.2):
 
 ```
-  CPU                          Avg MB/s    Best MB/s
+  Component                    Avg MB/s    Best MB/s
   ──────────────────────────────────────────────────
-  Intel Core Ultra 7 155H      431         440
-  AMD Zen                      382         406
-
-  SIMD: SSE4.2
+  Scanner                      416         423
+  Parser (pure block YAML)     174         175
+  Parser (mixed YAML)           95          97
 ```
+
+The parser uses an incremental state machine for block-context YAML
+(mappings, sequences, scalars), achieving ~1.8x the throughput of the
+eager path. Flow collections, tags, schemas, merge keys, and alias
+resolution fall back to eager evaluation automatically.
 
 Run `make bench` to test on your hardware. Use `make bench-cmp` to include
 a libyaml comparison (requires libyaml installed).
