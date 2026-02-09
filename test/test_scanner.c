@@ -90,6 +90,24 @@ static int scan_all_debug(const char *input, yam_token *out, int max_tokens) {
     return n;
 }
 
+/* Collect events from parser into an array, return count */
+static int parse_all(const char *input, yam_event *out, int max_events) {
+    test_arena_init();
+    yam_parser *p = yam_parser_new(input, strlen(input), test_arena);
+    if (!p) return 0;
+
+    int count = 0;
+    while (count < max_events) {
+        yam_status st = yam_parse_next(p, &out[count]);
+        if (st != YAM_OK) break;
+        if (out[count].type == YAM_EVT_STREAM_END) { count++; break; }
+        count++;
+    }
+
+    yam_parser_free(p);
+    return count;
+}
+
 /* ── Tests ───────────────────────────────────────────────── */
 
 static void test_empty_stream(void) {
@@ -322,6 +340,121 @@ static void test_long_double_escape(void) {
     if (ok) PASS(); else FAIL("double-quoted growth failed");
 }
 
+/* ── Event mark tests ────────────────────────────────────── */
+
+static void test_event_marks_scalar(void) {
+    TEST("event marks: scalar");
+    /* "hello" → +STR +DOC =VAL -DOC -STR */
+    yam_event evts[8];
+    int n = parse_all("hello", evts, 8);
+    /* events: STREAM_START DOC_START SCALAR DOC_END STREAM_END */
+    bool ok = n == 5;
+    if (ok) ok = evts[0].type == YAM_EVT_STREAM_START;
+    if (ok) ok = evts[0].start.line == 1 && evts[0].start.col == 1;
+    if (ok) ok = evts[2].type == YAM_EVT_SCALAR;
+    if (ok) ok = evts[2].start.line == 1 && evts[2].start.col == 1;
+    if (ok) PASS(); else FAIL("scalar marks");
+}
+
+static void test_event_marks_mapping(void) {
+    TEST("event marks: mapping");
+    /* "key: val" → +STR +DOC +MAP =VAL =VAL -MAP -DOC -STR */
+    yam_event evts[16];
+    int n = parse_all("key: val", evts, 16);
+    bool ok = n == 8;
+    /* MAP_START at 1:1 (where the key starts) */
+    if (ok) ok = evts[2].type == YAM_EVT_MAPPING_START;
+    if (ok) ok = evts[2].start.line == 1 && evts[2].start.col == 1;
+    /* key scalar at 1:1 */
+    if (ok) ok = evts[3].type == YAM_EVT_SCALAR;
+    if (ok) ok = evts[3].start.line == 1 && evts[3].start.col == 1;
+    /* value scalar at 1:6 */
+    if (ok) ok = evts[4].type == YAM_EVT_SCALAR;
+    if (ok) ok = evts[4].start.line == 1 && evts[4].start.col == 6;
+    if (ok) PASS(); else FAIL("mapping marks");
+}
+
+static void test_event_marks_sequence(void) {
+    TEST("event marks: sequence");
+    /* "- a\n- b" → +STR +DOC +SEQ =VAL =VAL -SEQ -DOC -STR */
+    yam_event evts[16];
+    int n = parse_all("- a\n- b", evts, 16);
+    bool ok = n == 8;
+    /* SEQ_START at 1:1 (where first - is) */
+    if (ok) ok = evts[2].type == YAM_EVT_SEQUENCE_START;
+    if (ok) ok = evts[2].start.line == 1 && evts[2].start.col == 1;
+    /* first value "a" at 1:3 */
+    if (ok) ok = evts[3].type == YAM_EVT_SCALAR;
+    if (ok) ok = evts[3].start.line == 1 && evts[3].start.col == 3;
+    /* second value "b" at 2:3 */
+    if (ok) ok = evts[4].type == YAM_EVT_SCALAR;
+    if (ok) ok = evts[4].start.line == 2 && evts[4].start.col == 3;
+    if (ok) PASS(); else FAIL("sequence marks");
+}
+
+static void test_event_marks_flow(void) {
+    TEST("event marks: flow");
+    /* "[a, b]" → +STR +DOC +SEQ =VAL =VAL -SEQ -DOC -STR */
+    yam_event evts[16];
+    int n = parse_all("[a, b]", evts, 16);
+    bool ok = n == 8;
+    /* SEQ_START at 1:1 (the [ character) */
+    if (ok) ok = evts[2].type == YAM_EVT_SEQUENCE_START;
+    if (ok) ok = evts[2].start.line == 1 && evts[2].start.col == 1;
+    /* first value "a" at 1:2 */
+    if (ok) ok = evts[3].type == YAM_EVT_SCALAR;
+    if (ok) ok = evts[3].start.line == 1 && evts[3].start.col == 2;
+    /* SEQ_END at 1:6 (the ] character) */
+    if (ok) ok = evts[5].type == YAM_EVT_SEQUENCE_END;
+    if (ok) ok = evts[5].start.line == 1 && evts[5].start.col == 6;
+    if (ok) PASS(); else FAIL("flow marks");
+}
+
+static void test_event_marks_doc(void) {
+    TEST("event marks: doc indicators");
+    /* "---\nhello\n..." → +STR +DOC =VAL -DOC -STR */
+    yam_event evts[8];
+    int n = parse_all("---\nhello\n...", evts, 8);
+    bool ok = n == 5;
+    /* DOC_START at 1:1 */
+    if (ok) ok = evts[1].type == YAM_EVT_DOC_START;
+    if (ok) ok = evts[1].start.line == 1 && evts[1].start.col == 1;
+    /* SCALAR at 2:1 */
+    if (ok) ok = evts[2].type == YAM_EVT_SCALAR;
+    if (ok) ok = evts[2].start.line == 2 && evts[2].start.col == 1;
+    /* DOC_END at 3:1 */
+    if (ok) ok = evts[3].type == YAM_EVT_DOC_END;
+    if (ok) ok = evts[3].start.line == 3 && evts[3].start.col == 1;
+    if (ok) PASS(); else FAIL("doc marks");
+}
+
+static void test_event_marks_anchor(void) {
+    TEST("event marks: anchor");
+    /* "&ref hi" → +STR +DOC =VAL -DOC -STR — scalar start at 1:1 (anchor pos) */
+    yam_event evts[8];
+    int n = parse_all("&ref hi", evts, 8);
+    bool ok = n == 5;
+    if (ok) ok = evts[2].type == YAM_EVT_SCALAR;
+    /* start should be at anchor position 1:1 (attach_props moves start) */
+    if (ok) ok = evts[2].start.line == 1 && evts[2].start.col == 1;
+    if (ok) PASS(); else FAIL("anchor marks");
+}
+
+static void test_event_marks_multiline(void) {
+    TEST("event marks: multiline mapping");
+    /* "a: 1\nb: 2" → +STR +DOC +MAP =VAL =VAL =VAL =VAL -MAP -DOC -STR */
+    yam_event evts[16];
+    int n = parse_all("a: 1\nb: 2", evts, 16);
+    bool ok = n == 10;
+    /* key "b" at 2:1 */
+    if (ok) ok = evts[5].type == YAM_EVT_SCALAR;
+    if (ok) ok = evts[5].start.line == 2 && evts[5].start.col == 1;
+    /* val "2" at 2:4 */
+    if (ok) ok = evts[6].type == YAM_EVT_SCALAR;
+    if (ok) ok = evts[6].start.line == 2 && evts[6].start.col == 4;
+    if (ok) PASS(); else FAIL("multiline marks");
+}
+
 /* ── Main ────────────────────────────────────────────────── */
 
 int main(void) {
@@ -343,6 +476,13 @@ int main(void) {
     test_comment();
     test_yaml12_bool();
     test_long_double_escape();
+    test_event_marks_scalar();
+    test_event_marks_mapping();
+    test_event_marks_sequence();
+    test_event_marks_flow();
+    test_event_marks_doc();
+    test_event_marks_anchor();
+    test_event_marks_multiline();
 
     printf("\n═══════════════════════════════════════════════════════════\n");
     printf("  %d/%d passed", tests_passed, tests_run);
