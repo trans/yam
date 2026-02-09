@@ -3141,7 +3141,10 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
     while (p->out_len == 0) {
         yam_status st = parser_step(p);
         if (st != YAM_OK) return st;
-        if (p->oom) return YAM_ERR_MEMORY;
+        if (p->oom) {
+            if (p->out_len > 0) break; /* drain valid events first */
+            return YAM_ERR_MEMORY;
+        }
         /* check for scanner error ignored by state machine */
         if (p->scan_error) return p->scan_error;
 
