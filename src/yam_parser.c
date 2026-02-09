@@ -100,27 +100,18 @@ struct yam_parser {
 
 /* ── Helpers ─────────────────────────────────────────────── */
 
-static yam_event evt_simple(yam_event_type type) {
+static inline yam_event evt_simple(yam_event_type type) {
     yam_event e;
     memset(&e, 0, sizeof(e));
     e.type = type;
     return e;
 }
 
-static bool over_limit(yam_parser *p) {
+static inline bool over_limit(yam_parser *p) {
     return p->max_events > 0 && p->evt_len >= p->max_events;
 }
 
-static bool enqueue(yam_parser *p, yam_event evt) {
-    /* resolve tag via schema if set and no explicit tag */
-    if (p->schema && evt.tag.data == NULL) {
-        if (evt.type == YAM_EVT_SCALAR)
-            evt.tag = yam_schema_resolve(p->schema, &evt);
-        else if (evt.type == YAM_EVT_MAPPING_START)
-            evt.tag = p->schema->default_map_tag;
-        else if (evt.type == YAM_EVT_SEQUENCE_START)
-            evt.tag = p->schema->default_seq_tag;
-    }
+static inline bool enqueue(yam_parser *p, const yam_event *evt) {
     if (over_limit(p)) { p->oom = true; return false; }
     if (p->evt_len >= p->evt_cap) {
         int new_cap = p->evt_cap * 2;
@@ -130,17 +121,27 @@ static bool enqueue(yam_parser *p, yam_event evt) {
         p->events = new_evts;
         p->evt_cap = new_cap;
     }
-    p->events[p->evt_len++] = evt;
+    yam_event *dst = &p->events[p->evt_len++];
+    *dst = *evt;
+    /* resolve tag via schema if set and no explicit tag */
+    if (p->schema && dst->tag.data == NULL) {
+        if (dst->type == YAM_EVT_SCALAR)
+            dst->tag = yam_schema_resolve(p->schema, dst);
+        else if (dst->type == YAM_EVT_MAPPING_START)
+            dst->tag = p->schema->default_map_tag;
+        else if (dst->type == YAM_EVT_SEQUENCE_START)
+            dst->tag = p->schema->default_seq_tag;
+    }
     return true;
 }
 
-static bool dequeue(yam_parser *p, yam_event *evt) {
+static inline bool dequeue(yam_parser *p, yam_event *evt) {
     if (p->evt_cursor >= p->evt_len) return false;
     *evt = p->events[p->evt_cursor++];
     return true;
 }
 
-static bool push_ctx(yam_parser *p, ctx_type type, int indent) {
+static inline bool push_ctx(yam_parser *p, ctx_type type, int indent) {
     if (p->ctx_len >= p->ctx_cap) {
         int new_cap = p->ctx_cap * 2;
         ctx_entry *new_data = realloc(p->contexts, new_cap * sizeof(ctx_entry));
@@ -152,17 +153,17 @@ static bool push_ctx(yam_parser *p, ctx_type type, int indent) {
     return true;
 }
 
-static void pop_ctx(yam_parser *p) {
+static inline void pop_ctx(yam_parser *p) {
     if (p->ctx_len > 0) p->ctx_len--;
 }
 
-static ctx_entry *top_ctx(yam_parser *p) {
+static inline ctx_entry *top_ctx(yam_parser *p) {
     return p->ctx_len > 0 ? &p->contexts[p->ctx_len - 1] : NULL;
 }
 
 /* ── Token access ────────────────────────────────────────── */
 
-static yam_status peek_token(yam_parser *p) {
+static inline yam_status peek_token(yam_parser *p) {
     if (p->have_token) return YAM_OK;
     yam_status st = yam_scan_next(p->scanner, &p->current);
     if (st != YAM_OK) {
@@ -177,22 +178,22 @@ static yam_status peek_token(yam_parser *p) {
     return YAM_OK;
 }
 
-static void consume_token(yam_parser *p) {
+static inline void consume_token(yam_parser *p) {
     p->have_token = false;
 }
 
-static yam_token_type tok_type(yam_parser *p) {
+static inline yam_token_type tok_type(yam_parser *p) {
     return p->current.type;
 }
 
 /* Token column (0-based) */
-static int tok_col(yam_parser *p) {
+static inline int tok_col(yam_parser *p) {
     return (int)p->current.start.col - 1;
 }
 
 /* ── Context helpers ─────────────────────────────────────── */
 
-static bool in_flow(yam_parser *p) {
+static inline bool in_flow(yam_parser *p) {
     ctx_entry *top = top_ctx(p);
     return top && (top->type == CTX_FLOW_MAP || top->type == CTX_FLOW_SEQ);
 }
@@ -207,14 +208,14 @@ static void unroll_all(yam_parser *p, yam_mark mark) {
         yam_event evt = evt_simple(et);
         evt.start = mark;
         evt.end = mark;
-        enqueue(p, evt);
+        enqueue(p, &evt);
         pop_ctx(p);
     }
 }
 
 /* ── Attach pending anchor/tag ───────────────────────────── */
 
-static void attach_props(yam_parser *p, yam_event *evt) {
+static inline void attach_props(yam_parser *p, yam_event *evt) {
     bool had_props = p->has_anchor || p->has_tag;
     if (p->has_anchor) {
         evt->anchor = p->pending_anchor;
@@ -239,7 +240,7 @@ static void emit_empty(yam_parser *p) {
     evt.start = p->current.start;
     evt.end = p->current.start;
     attach_props(p, &evt);
-    enqueue(p, evt);
+    enqueue(p, &evt);
 }
 
 /* ── Ensure doc is open ──────────────────────────────────── */
@@ -250,7 +251,7 @@ static void ensure_doc(yam_parser *p, bool explicit, yam_mark mark) {
         evt.implicit = !explicit;
         evt.start = mark;
         evt.end = mark;
-        enqueue(p, evt);
+        enqueue(p, &evt);
         p->doc_open = true;
     }
 }
@@ -406,7 +407,7 @@ static yam_status parse_flow_sequence(yam_parser *p) {
             yam_event end_evt = evt_simple(YAM_EVT_SEQUENCE_END);
             end_evt.start = close;
             end_evt.end = close_end;
-            enqueue(p, end_evt);
+            enqueue(p, &end_evt);
             pop_ctx(p);
             return YAM_OK;
         }
@@ -418,7 +419,7 @@ static yam_status parse_flow_sequence(yam_parser *p) {
             map_evt.flow = true;
             map_evt.start = p->current.start;
             map_evt.end = p->current.end;
-            enqueue(p, map_evt);
+            enqueue(p, &map_evt);
 
             consume_token(p);  /* consume ? */
             st = peek_token(p);
@@ -455,7 +456,7 @@ static yam_status parse_flow_sequence(yam_parser *p) {
                 yam_event end_evt = evt_simple(YAM_EVT_MAPPING_END);
                 end_evt.start = p->current.start;
                 end_evt.end = p->current.start;
-                enqueue(p, end_evt);
+                enqueue(p, &end_evt);
             }
             goto check_flow_sep;
         }
@@ -481,7 +482,7 @@ static yam_status parse_flow_sequence(yam_parser *p) {
                 placeholder.flow = true;
                 placeholder.start = p->events[key_idx].start;
                 placeholder.end = p->events[key_idx].start;
-                if (!enqueue(p, placeholder)) return YAM_ERR_MEMORY;
+                if (!enqueue(p, &placeholder)) return YAM_ERR_MEMORY;
                 /* shift key events right to make room for mapping start */
                 memmove(&p->events[key_idx + 1],
                         &p->events[key_idx],
@@ -505,7 +506,7 @@ static yam_status parse_flow_sequence(yam_parser *p) {
                 yam_event end_evt = evt_simple(YAM_EVT_MAPPING_END);
                 end_evt.start = p->current.start;
                 end_evt.end = p->current.start;
-                enqueue(p, end_evt);
+                enqueue(p, &end_evt);
             }
         }
 
@@ -544,7 +545,7 @@ static yam_status parse_flow_mapping(yam_parser *p) {
             yam_event end_evt = evt_simple(YAM_EVT_MAPPING_END);
             end_evt.start = close;
             end_evt.end = close_end;
-            enqueue(p, end_evt);
+            enqueue(p, &end_evt);
             pop_ctx(p);
             return YAM_OK;
         }
@@ -620,7 +621,7 @@ static yam_status parse_flow_node(yam_parser *p) {
         evt.start = p->current.start;
         evt.end = p->current.end;
         attach_props(p, &evt);
-        enqueue(p, evt);
+        enqueue(p, &evt);
         consume_token(p);
         return YAM_OK;
     }
@@ -635,7 +636,7 @@ static yam_status parse_flow_node(yam_parser *p) {
         evt.start = open_start;
         evt.end = open_end;
         attach_props(p, &evt);
-        enqueue(p, evt);
+        enqueue(p, &evt);
         push_ctx(p, CTX_FLOW_SEQ, col);
         return parse_flow_sequence(p);
     }
@@ -650,7 +651,7 @@ static yam_status parse_flow_node(yam_parser *p) {
         evt.start = open_start;
         evt.end = open_end;
         attach_props(p, &evt);
-        enqueue(p, evt);
+        enqueue(p, &evt);
         push_ctx(p, CTX_FLOW_MAP, col);
         return parse_flow_mapping(p);
     }
@@ -674,7 +675,7 @@ static yam_status parse_flow_node(yam_parser *p) {
             /* For now, just emit the scalar; the caller handles key-value */
         }
 
-        enqueue(p, evt);
+        enqueue(p, &evt);
         return YAM_OK;
     }
 
@@ -823,7 +824,7 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
 
             if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
                 /* confirmed key */
-                enqueue(p, evt);
+                enqueue(p, &evt);
                 st = parse_block_map_value(p, map_indent);
                 if (st != YAM_OK) return st;
                 continue;
@@ -831,7 +832,7 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
 
             /* not a key, just a value — this shouldn't really happen
                in a well-formed mapping, but emit it and break */
-            enqueue(p, evt);
+            enqueue(p, &evt);
             break;
         }
 
@@ -848,12 +849,12 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
             if (st != YAM_OK) return st;
 
             if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
-                enqueue(p, evt);
+                enqueue(p, &evt);
                 st = parse_block_map_value(p, map_indent);
                 if (st != YAM_OK) return st;
                 continue;
             }
-            enqueue(p, evt);
+            enqueue(p, &evt);
             break;
         }
 
@@ -994,9 +995,9 @@ static yam_status parse_block_node(yam_parser *p) {
                 map_evt.start = evt.start;
                 map_evt.end = evt.start;
                 attach_props(p, &map_evt); /* outer anchor/tag */
-                enqueue(p, map_evt);
+                enqueue(p, &map_evt);
                 push_ctx(p, CTX_BLOCK_MAP, scalar_col);
-                enqueue(p, evt); /* key scalar with inner anchor/tag */
+                enqueue(p, &evt); /* key scalar with inner anchor/tag */
 
                 st = parse_block_map_value(p, scalar_col);
                 if (st != YAM_OK) return st;
@@ -1006,7 +1007,7 @@ static yam_status parse_block_node(yam_parser *p) {
                     yam_event end_evt = evt_simple(YAM_EVT_MAPPING_END);
                     end_evt.start = p->current.start;
                     end_evt.end = p->current.start;
-                    enqueue(p, end_evt);
+                    enqueue(p, &end_evt);
                 }
                 pop_ctx(p);
                 return YAM_OK;
@@ -1015,7 +1016,7 @@ static yam_status parse_block_node(yam_parser *p) {
             /* not a mapping — outer props go on scalar, inner should too
              * (but this is unusual; fall through with scalar) */
             attach_props(p, &evt);
-            enqueue(p, evt);
+            enqueue(p, &evt);
             return YAM_OK;
         }
 
@@ -1024,7 +1025,7 @@ static yam_status parse_block_node(yam_parser *p) {
             evt.start = p->current.start;
             evt.end = p->current.end;
             attach_props(p, &evt);
-            enqueue(p, evt);
+            enqueue(p, &evt);
             push_ctx(p, CTX_BLOCK_SEQ, col);
             /* Restore inner props for the first entry's node */
             p->pending_anchor = inner_anchor;
@@ -1037,7 +1038,7 @@ static yam_status parse_block_node(yam_parser *p) {
                 yam_event end_evt = evt_simple(YAM_EVT_SEQUENCE_END);
                 end_evt.start = p->current.start;
                 end_evt.end = p->current.start;
-                enqueue(p, end_evt);
+                enqueue(p, &end_evt);
             }
             pop_ctx(p);
             return YAM_OK;
@@ -1056,7 +1057,7 @@ static yam_status parse_block_node(yam_parser *p) {
             map_evt.tag = saved_tag;
             map_evt.start = saved_props_start;
             map_evt.end = saved_props_start;
-            enqueue(p, map_evt);
+            enqueue(p, &map_evt);
             push_ctx(p, CTX_BLOCK_MAP, flow_col);
 
             /* Parse the flow collection directly (not via parse_block_node,
@@ -1075,7 +1076,7 @@ static yam_status parse_block_node(yam_parser *p) {
                 sevt.end = flow_open_end;
                 if (inner_has_anchor) sevt.anchor = inner_anchor;
                 if (inner_has_tag) sevt.tag = inner_tag;
-                enqueue(p, sevt);
+                enqueue(p, &sevt);
                 push_ctx(p, CTX_FLOW_SEQ, col);
                 st = parse_flow_sequence(p);
             } else {
@@ -1085,7 +1086,7 @@ static yam_status parse_block_node(yam_parser *p) {
                 mevt.end = flow_open_end;
                 if (inner_has_anchor) mevt.anchor = inner_anchor;
                 if (inner_has_tag) mevt.tag = inner_tag;
-                enqueue(p, mevt);
+                enqueue(p, &mevt);
                 push_ctx(p, CTX_FLOW_MAP, col);
                 st = parse_flow_mapping(p);
             }
@@ -1104,7 +1105,7 @@ static yam_status parse_block_node(yam_parser *p) {
                 yam_event end_evt = evt_simple(YAM_EVT_MAPPING_END);
                 end_evt.start = p->current.start;
                 end_evt.end = p->current.start;
-                enqueue(p, end_evt);
+                enqueue(p, &end_evt);
             }
             pop_ctx(p);
             return YAM_OK;
@@ -1123,7 +1124,7 @@ static yam_status parse_block_node(yam_parser *p) {
         empty.start = p->current.start;
         empty.end = p->current.start;
         attach_props(p, &empty);
-        enqueue(p, empty);
+        enqueue(p, &empty);
         return YAM_OK;
     }
 
@@ -1145,9 +1146,9 @@ static yam_status parse_block_node(yam_parser *p) {
             map_evt.start = evt.start;
             map_evt.end = evt.start;
             attach_props(p, &map_evt);
-            enqueue(p, map_evt);
+            enqueue(p, &map_evt);
             push_ctx(p, CTX_BLOCK_MAP, alias_col);
-            enqueue(p, evt); /* alias as key (no props) */
+            enqueue(p, &evt); /* alias as key (no props) */
             st = parse_block_map_value(p, alias_col);
             if (st != YAM_OK) return st;
             st = parse_block_mapping(p, alias_col);
@@ -1156,14 +1157,14 @@ static yam_status parse_block_node(yam_parser *p) {
                 yam_event end_evt = evt_simple(YAM_EVT_MAPPING_END);
                 end_evt.start = p->current.start;
                 end_evt.end = p->current.start;
-                enqueue(p, end_evt);
+                enqueue(p, &end_evt);
             }
             pop_ctx(p);
             return YAM_OK;
         }
 
         attach_props(p, &evt);
-        enqueue(p, evt);
+        enqueue(p, &evt);
         return YAM_OK;
     }
 
@@ -1181,7 +1182,7 @@ static yam_status parse_block_node(yam_parser *p) {
         evt.start = open_start;
         evt.end = open_end;
         attach_props(p, &evt);
-        enqueue(p, evt);
+        enqueue(p, &evt);
         push_ctx(p, CTX_FLOW_SEQ, col);
         st = parse_flow_sequence(p);
         if (st != YAM_OK) return st;
@@ -1199,7 +1200,7 @@ static yam_status parse_block_node(yam_parser *p) {
             yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
             map_evt.start = p->events[saved_evt_len].start;
             map_evt.end = p->events[saved_evt_len].start;
-            if (!enqueue(p, map_evt)) return YAM_ERR_MEMORY;
+            if (!enqueue(p, &map_evt)) return YAM_ERR_MEMORY;
             memmove(&p->events[saved_evt_len + 1],
                     &p->events[saved_evt_len],
                     (p->evt_len - saved_evt_len - 1) * sizeof(yam_event));
@@ -1213,7 +1214,7 @@ static yam_status parse_block_node(yam_parser *p) {
                 yam_event end_evt = evt_simple(YAM_EVT_MAPPING_END);
                 end_evt.start = p->current.start;
                 end_evt.end = p->current.start;
-                enqueue(p, end_evt);
+                enqueue(p, &end_evt);
             }
             pop_ctx(p);
         }
@@ -1234,7 +1235,7 @@ static yam_status parse_block_node(yam_parser *p) {
         evt.start = open_start2;
         evt.end = open_end2;
         attach_props(p, &evt);
-        enqueue(p, evt);
+        enqueue(p, &evt);
         push_ctx(p, CTX_FLOW_MAP, col);
         st = parse_flow_mapping(p);
         if (st != YAM_OK) return st;
@@ -1250,7 +1251,7 @@ static yam_status parse_block_node(yam_parser *p) {
             yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
             map_evt.start = p->events[saved_evt_len].start;
             map_evt.end = p->events[saved_evt_len].start;
-            if (!enqueue(p, map_evt)) return YAM_ERR_MEMORY;
+            if (!enqueue(p, &map_evt)) return YAM_ERR_MEMORY;
             memmove(&p->events[saved_evt_len + 1],
                     &p->events[saved_evt_len],
                     (p->evt_len - saved_evt_len - 1) * sizeof(yam_event));
@@ -1264,7 +1265,7 @@ static yam_status parse_block_node(yam_parser *p) {
                 yam_event end_evt = evt_simple(YAM_EVT_MAPPING_END);
                 end_evt.start = p->current.start;
                 end_evt.end = p->current.start;
-                enqueue(p, end_evt);
+                enqueue(p, &end_evt);
             }
             pop_ctx(p);
         }
@@ -1283,7 +1284,7 @@ static yam_status parse_block_node(yam_parser *p) {
         empty_evt.start = p->current.start;
         empty_evt.end = p->current.start;
         attach_props(p, &empty_evt);
-        enqueue(p, empty_evt);
+        enqueue(p, &empty_evt);
         return YAM_OK;
     }
     if ((p->has_anchor || p->has_tag) && tt == YAM_TOK_BLOCK_SEQ_ENTRY) {
@@ -1302,7 +1303,7 @@ static yam_status parse_block_node(yam_parser *p) {
             empty_evt.start = p->current.start;
             empty_evt.end = p->current.start;
             attach_props(p, &empty_evt);
-            enqueue(p, empty_evt);
+            enqueue(p, &empty_evt);
             return YAM_OK;
         }
     }
@@ -1313,7 +1314,7 @@ static yam_status parse_block_node(yam_parser *p) {
         evt.start = p->current.start;
         evt.end = p->current.end;
         attach_props(p, &evt);
-        enqueue(p, evt);
+        enqueue(p, &evt);
         push_ctx(p, CTX_BLOCK_SEQ, col);
         st = parse_block_sequence(p, col);
         if (st != YAM_OK) return st;
@@ -1321,7 +1322,7 @@ static yam_status parse_block_node(yam_parser *p) {
             yam_event end_evt = evt_simple(YAM_EVT_SEQUENCE_END);
             end_evt.start = p->current.start;
             end_evt.end = p->current.start;
-            enqueue(p, end_evt);
+            enqueue(p, &end_evt);
         }
         pop_ctx(p);
         return YAM_OK;
@@ -1338,7 +1339,7 @@ static yam_status parse_block_node(yam_parser *p) {
             empty_evt.start = p->current.start;
             empty_evt.end = p->current.start;
             attach_props(p, &empty_evt);
-            enqueue(p, empty_evt);
+            enqueue(p, &empty_evt);
             return YAM_OK;
         }
 
@@ -1389,16 +1390,16 @@ static yam_status parse_block_node(yam_parser *p) {
                     map_evt.start = evt.start;
                     map_evt.end = evt.start;
                     attach_props(p, &map_evt);
-                    enqueue(p, map_evt);
+                    enqueue(p, &map_evt);
                     push_ctx(p, CTX_BLOCK_MAP, map_col);
-                    enqueue(p, evt); /* key scalar without props */
+                    enqueue(p, &evt); /* key scalar without props */
                 } else {
                     map_evt.start = evt.start;
                     map_evt.end = evt.start;
-                    enqueue(p, map_evt);
+                    enqueue(p, &map_evt);
                     push_ctx(p, CTX_BLOCK_MAP, map_col);
                     attach_props(p, &evt); /* props go on the key scalar */
-                    enqueue(p, evt);
+                    enqueue(p, &evt);
                 }
 
                 st = parse_block_map_value(p, map_col);
@@ -1412,7 +1413,7 @@ static yam_status parse_block_node(yam_parser *p) {
                     yam_event end_evt = evt_simple(YAM_EVT_MAPPING_END);
                     end_evt.start = p->current.start;
                     end_evt.end = p->current.start;
-                    enqueue(p, end_evt);
+                    enqueue(p, &end_evt);
                 }
                 pop_ctx(p);
                 return YAM_OK;
@@ -1421,7 +1422,7 @@ static yam_status parse_block_node(yam_parser *p) {
 
         /* just a scalar value — attach props now */
         attach_props(p, &evt);
-        enqueue(p, evt);
+        enqueue(p, &evt);
         return YAM_OK;
     }
 
@@ -1431,7 +1432,7 @@ static yam_status parse_block_node(yam_parser *p) {
         map_evt.start = p->current.start;
         map_evt.end = p->current.end;
         attach_props(p, &map_evt);
-        enqueue(p, map_evt);
+        enqueue(p, &map_evt);
         push_ctx(p, CTX_BLOCK_MAP, col);
 
         st = parse_block_mapping(p, col);
@@ -1441,7 +1442,7 @@ static yam_status parse_block_node(yam_parser *p) {
             yam_event end_evt = evt_simple(YAM_EVT_MAPPING_END);
             end_evt.start = p->current.start;
             end_evt.end = p->current.start;
-            enqueue(p, end_evt);
+            enqueue(p, &end_evt);
         }
         pop_ctx(p);
         return YAM_OK;
@@ -1458,7 +1459,7 @@ static yam_status parse_block_node(yam_parser *p) {
             int map_col = p->props_col;
             map_evt.start = p->props_start;
             map_evt.end = p->props_start;
-            enqueue(p, map_evt);
+            enqueue(p, &map_evt);
             push_ctx(p, CTX_BLOCK_MAP, map_col);
             /* emit empty key with the pending props */
             yam_event key_evt = evt_simple(YAM_EVT_SCALAR);
@@ -1466,12 +1467,12 @@ static yam_status parse_block_node(yam_parser *p) {
             key_evt.start = p->current.start;
             key_evt.end = p->current.start;
             attach_props(p, &key_evt);
-            enqueue(p, key_evt);
+            enqueue(p, &key_evt);
             st = parse_block_map_value(p, map_col);
             if (st != YAM_OK) return st;
             st = parse_block_mapping(p, map_col);
         } else {
-            enqueue(p, map_evt);
+            enqueue(p, &map_evt);
             push_ctx(p, CTX_BLOCK_MAP, col);
             st = parse_block_mapping(p, col);
         }
@@ -1481,7 +1482,7 @@ static yam_status parse_block_node(yam_parser *p) {
             yam_event end_evt = evt_simple(YAM_EVT_MAPPING_END);
             end_evt.start = p->current.start;
             end_evt.end = p->current.start;
-            enqueue(p, end_evt);
+            enqueue(p, &end_evt);
         }
         pop_ctx(p);
         return YAM_OK;
@@ -1560,7 +1561,7 @@ static yam_status parse_document(yam_parser *p) {
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.start;
-            enqueue(p, evt);
+            enqueue(p, &evt);
             p->doc_open = false;
         }
         yam_mark doc_start = p->current.start;
@@ -1570,7 +1571,7 @@ static yam_status parse_document(yam_parser *p) {
         evt.implicit = false;
         evt.start = doc_start;
         evt.end = doc_end;
-        enqueue(p, evt);
+        enqueue(p, &evt);
         p->doc_open = true;
 
         /* peek for content */
@@ -1597,7 +1598,7 @@ static yam_status parse_document(yam_parser *p) {
             evt.implicit = false;
             evt.start = p->current.start;
             evt.end = p->current.end;
-            enqueue(p, evt);
+            enqueue(p, &evt);
             p->doc_open = false;
         }
         consume_token(p);
@@ -1634,7 +1635,7 @@ static yam_status parse_stream(yam_parser *p) {
         yam_event sevt = evt_simple(YAM_EVT_STREAM_START);
         sevt.start = stream_start;
         sevt.end = stream_start_end;
-        enqueue(p, sevt);
+        enqueue(p, &sevt);
     }
     p->stream_started = true;
 
@@ -1651,7 +1652,7 @@ static yam_status parse_stream(yam_parser *p) {
                 evt.implicit = true;
                 evt.start = p->current.start;
                 evt.end = p->current.start;
-                enqueue(p, evt);
+                enqueue(p, &evt);
                 p->doc_open = false;
             }
             yam_mark end_mark = p->current.start;
@@ -1661,7 +1662,7 @@ static yam_status parse_stream(yam_parser *p) {
                 yam_event se = evt_simple(YAM_EVT_STREAM_END);
                 se.start = end_mark;
                 se.end = end_mark_end;
-                enqueue(p, se);
+                enqueue(p, &se);
             }
             p->stream_ended = true;
             return YAM_OK;
@@ -2174,7 +2175,11 @@ yam_parser *yam_parser_new(const char *input, size_t len, yam_arena *a) {
     p->arena = a;
     p->have_token = false;
 
-    p->evt_cap = 64;
+    /* ~1 event per 7 input bytes; clamp to [64, 4M] */
+    int est = (int)(len / 7);
+    if (est < 64) est = 64;
+    if (est > 4 * 1024 * 1024) est = 4 * 1024 * 1024;
+    p->evt_cap = est;
     p->events = malloc(p->evt_cap * sizeof(yam_event));
     if (!p->events) { yam_scanner_free(p->scanner); free(p); return NULL; }
     p->evt_len = 0;
