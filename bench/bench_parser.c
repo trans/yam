@@ -80,6 +80,33 @@ static char *generate_block_yaml(size_t target_size, size_t *out_len) {
     return buf;
 }
 
+/* JSON (valid YAML): array of objects with quoted keys/strings */
+static char *generate_json(size_t target_size, size_t *out_len) {
+    char *buf = (char *)malloc(target_size + 4096);
+    if (!buf) return NULL;
+
+    size_t pos = 0;
+    int item = 0;
+
+    pos += sprintf(buf + pos, "[\n");
+
+    while (pos < target_size) {
+        if (item > 0) pos += sprintf(buf + pos, ",\n");
+        pos += sprintf(buf + pos,
+            "  {\"id\": %d, \"name\": \"item-%d\", \"value\": %d,"
+            " \"nested\": {\"x\": %d, \"y\": %d}}",
+            item, item,
+            item * 17 % 1000,
+            item * 7 % 500, item * 13 % 500
+        );
+        item++;
+    }
+
+    pos += sprintf(buf + pos, "\n]\n");
+    *out_len = pos;
+    return buf;
+}
+
 /* ── Timing ──────────────────────────────────────────────── */
 
 static double time_sec(void) {
@@ -237,6 +264,12 @@ int main(int argc, char **argv) {
     yaml = generate_mixed_yaml(target_size, &len);
     if (!yaml) { fprintf(stderr, "allocation failed\n"); return 1; }
     run_bench("Mixed YAML (flow + quotes)", yaml, len);
+    free(yaml);
+
+    /* ── JSON (valid YAML, all flow → eager fallback) ── */
+    yaml = generate_json(target_size, &len);
+    if (!yaml) { fprintf(stderr, "allocation failed\n"); return 1; }
+    run_bench("JSON", yaml, len);
     free(yaml);
 
     return 0;
