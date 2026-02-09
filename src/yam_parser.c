@@ -2219,6 +2219,50 @@ static yam_status resolve_aliases(yam_parser *p) {
     return YAM_OK;
 }
 
+/* ── Flow-as-key lookahead ──────────────────────────────── */
+
+/* Scan raw bytes from offset to find the matching ] or } at depth 0,
+ * then check if ':' follows (skipping whitespace and comments).
+ * Returns true if the flow collection is a complex block key. */
+static bool flow_is_block_key(const char *input, size_t len, size_t offset) {
+    int depth = 0;
+    bool in_sq = false, in_dq = false;
+    for (size_t i = offset; i < len; i++) {
+        char c = input[i];
+        if (in_sq) {
+            if (c == '\'' && i + 1 < len && input[i + 1] == '\'') i++;
+            else if (c == '\'') in_sq = false;
+            continue;
+        }
+        if (in_dq) {
+            if (c == '\\') { i++; continue; }
+            if (c == '"') in_dq = false;
+            continue;
+        }
+        if (c == '#') { while (i < len && input[i] != '\n') i++; continue; }
+        if (c == '\'') { in_sq = true; continue; }
+        if (c == '"') { in_dq = true; continue; }
+        if (c == '[' || c == '{') depth++;
+        else if (c == ']' || c == '}') {
+            depth--;
+            if (depth == 0) {
+                for (size_t j = i + 1; j < len; j++) {
+                    char nc = input[j];
+                    if (nc == ' ' || nc == '\t') continue;
+                    if (nc == '\n' || nc == '\r') continue;
+                    if (nc == '#') {
+                        while (j < len && input[j] != '\n') j++;
+                        continue;
+                    }
+                    return nc == ':';
+                }
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
 /* ── Incremental state machine ───────────────────────────── */
 
 static inline void inc_emit(yam_parser *p, yam_event evt) {
@@ -2459,10 +2503,12 @@ static yam_status parser_step(yam_parser *p) {
         }
 
         if (tt == YAM_TOK_FLOW_SEQ_START || tt == YAM_TOK_FLOW_MAP_START) {
-            /* In value position (block map value), flow can't be a key —
-             * safe to parse incrementally. Otherwise flow could be a
-             * complex block key ([flow]: value), so fall back to eager. */
-            if (p->node_return == ST_BLOCK_MAP_LOOP) {
+            /* Check if this flow collection is used as a complex block key
+             * ([flow]: value). Map values can't be keys; for other positions
+             * scan ahead to check if ':' follows the matching close bracket. */
+            if (p->node_return == ST_BLOCK_MAP_LOOP ||
+                !flow_is_block_key(p->input, p->input_len,
+                                   p->current.start.offset)) {
                 p->state = ST_FLOW_NODE;
             } else {
                 p->state = ST_EAGER_DRAIN;
@@ -3235,10 +3281,17 @@ static yam_status parser_step(yam_parser *p) {
         }
 
         /* nested flow collection as entry — could be implicit pair key
-         * ([{a}: val]) which we can't handle incrementally, so fall back
-         * to eager before emitting any events for the nested collection */
+         * ([{a}: val]) which we can't handle incrementally.  Scan ahead
+         * to the matching close bracket: if ':' follows it's a pair key
+         * and we fall back to eager; otherwise parse incrementally. */
         if (tt == YAM_TOK_FLOW_SEQ_START || tt == YAM_TOK_FLOW_MAP_START) {
-            p->state = ST_EAGER_DRAIN;
+            if (flow_is_block_key(p->input, p->input_len,
+                                  p->current.start.offset)) {
+                p->state = ST_EAGER_DRAIN;
+            } else {
+                p->node_return = ST_FLOW_SEQ_SEP;
+                p->state = ST_FLOW_NODE;
+            }
             return YAM_OK;
         }
 
