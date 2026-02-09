@@ -30,11 +30,39 @@ typedef struct {
     int      indent;
 } ctx_entry;
 
+/* ── Incremental parser states ──────────────────────────── */
+
+typedef enum {
+    ST_STREAM_START, ST_STREAM_DOC_LOOP, ST_STREAM_END,
+    ST_DOC_DIRECTIVES, ST_DOC_START_EXPLICIT, ST_DOC_START_IMPLICIT,
+    ST_DOC_END_EXPLICIT, ST_DOC_CONTENT,
+    ST_BLOCK_NODE, ST_BLOCK_NODE_SCALAR, ST_BLOCK_NODE_SCALAR_KEY,
+    ST_BLOCK_NODE_ALIAS, ST_BLOCK_NODE_ALIAS_KEY,
+    ST_BLOCK_NODE_SEQ, ST_BLOCK_NODE_EXPLICIT_KEY, ST_BLOCK_NODE_BARE_VALUE,
+    ST_BLOCK_NODE_EMPTY,
+    ST_BLOCK_MAP_LOOP, ST_BLOCK_MAP_EXPLICIT_KEY, ST_BLOCK_MAP_SIMPLE_KEY,
+    ST_BLOCK_MAP_POST_KEY, ST_BLOCK_MAP_VALUE, ST_BLOCK_MAP_VALUE_NODE,
+    ST_BLOCK_MAP_END,
+    ST_BLOCK_SEQ_LOOP, ST_BLOCK_SEQ_ENTRY, ST_BLOCK_SEQ_ENTRY_NODE,
+    ST_BLOCK_SEQ_END,
+    ST_UNROLL,
+    ST_EAGER_DRAIN,
+    ST_DONE,
+} parser_state;
+
+typedef struct {
+    ctx_type     type;
+    int          indent;
+    parser_state return_state;
+} state_frame;
+
 /* ── Parser state ────────────────────────────────────────── */
 
 struct yam_parser {
     yam_scanner *scanner;
     yam_arena   *arena;
+    const char  *input;
+    size_t       input_len;
 
     /* token lookahead */
     yam_token current;
@@ -88,6 +116,23 @@ struct yam_parser {
     char     error_msg[256];
     yam_mark error_mark;
     bool     oom;
+
+    /* incremental state machine */
+    bool         incremental;   /* true = state machine, false = eager */
+    parser_state state;
+    state_frame *frames;
+    int          frame_len;
+    int          frame_cap;
+    yam_event    out_buf[8];    /* small output buffer for incremental */
+    int          out_len;
+    int          out_cursor;
+    yam_event    saved_node;    /* saved scalar/alias for : lookahead */
+    int          saved_node_col;
+    bool         have_saved_node;
+    parser_state unroll_return;
+    parser_state node_return;  /* where to go after a block node completes */
+    int          events_delivered; /* events returned to caller (for eager fallback skip) */
+    yam_status   scan_error;      /* last scanner error (for incremental path) */
 };
 
 /* ── Error reporting ─────────────────────────────────────── */
@@ -172,6 +217,7 @@ static inline yam_status peek_token(yam_parser *p) {
             snprintf(p->error_msg, sizeof(p->error_msg), "%s", smsg);
             p->error_mark = yam_scanner_error_mark(p->scanner);
         }
+        p->scan_error = st; /* save for incremental path error detection */
         return st;
     }
     p->have_token = true;
@@ -2163,6 +2209,823 @@ static yam_status resolve_aliases(yam_parser *p) {
     return YAM_OK;
 }
 
+/* ── Incremental state machine ───────────────────────────── */
+
+static inline void inc_emit(yam_parser *p, yam_event evt) {
+    if (p->out_len < 8)
+        p->out_buf[p->out_len++] = evt;
+}
+
+static inline void inc_push_frame(yam_parser *p, ctx_type type, int indent,
+                                   parser_state return_state) {
+    if (p->frame_len >= p->frame_cap) {
+        int nc = p->frame_cap * 2;
+        state_frame *nf = realloc(p->frames, nc * sizeof(state_frame));
+        if (!nf) { p->oom = true; return; }
+        p->frames = nf;
+        p->frame_cap = nc;
+    }
+    p->frames[p->frame_len++] = (state_frame){type, indent, return_state};
+}
+
+static inline state_frame inc_pop_frame(yam_parser *p) {
+    if (p->frame_len > 0) return p->frames[--p->frame_len];
+    return (state_frame){0, -1, ST_DONE};
+}
+
+static inline state_frame *inc_top_frame(yam_parser *p) {
+    if (p->frame_len > 0) return &p->frames[p->frame_len - 1];
+    return NULL;
+}
+
+static yam_status parser_step(yam_parser *p) {
+    yam_token_type tt;
+    int col;
+    yam_mark mark;
+    yam_event evt;
+    state_frame *top;
+
+    if (p->oom) return YAM_ERR_MEMORY;
+
+    switch (p->state) {
+
+    case ST_STREAM_START:
+        evt = evt_simple(YAM_EVT_STREAM_START);
+        peek_token(p);
+        evt.start = p->current.start;
+        evt.end = p->current.end;
+        consume_token(p);
+        inc_emit(p, evt);
+        p->state = ST_STREAM_DOC_LOOP;
+        return YAM_OK;
+
+    case ST_STREAM_DOC_LOOP:
+        peek_token(p);
+        tt = tok_type(p);
+        if (tt == YAM_TOK_STREAM_END) {
+            p->state = ST_STREAM_END;
+            return YAM_OK;
+        }
+        p->state = ST_DOC_DIRECTIVES;
+        return YAM_OK;
+
+    case ST_STREAM_END:
+        evt = evt_simple(YAM_EVT_STREAM_END);
+        peek_token(p);
+        evt.start = p->current.start;
+        evt.end = p->current.end;
+        consume_token(p);
+        inc_emit(p, evt);
+        p->stream_ended = true;
+        p->state = ST_DONE;
+        return YAM_OK;
+
+    case ST_DOC_DIRECTIVES:
+        /* check for %TAG / %YAML directives — fall back to eager */
+        peek_token(p);
+        tt = tok_type(p);
+        if ((tt == YAM_TOK_TAG && p->current.value.len > 0 &&
+             p->current.value.data[0] == '%') ||
+            (tt == YAM_TOK_SCALAR && p->current.value.len > 0 &&
+             p->current.value.data[0] == '%')) {
+            p->state = ST_EAGER_DRAIN;
+            return YAM_OK;
+        }
+        if (tt == YAM_TOK_DOC_START) {
+            p->state = ST_DOC_START_EXPLICIT;
+        } else if (tt == YAM_TOK_DOC_END) {
+            /* doc end without content, emit implicit doc */
+            consume_token(p);
+            p->state = ST_STREAM_DOC_LOOP;
+        } else if (tt == YAM_TOK_STREAM_END) {
+            p->state = ST_STREAM_END;
+        } else {
+            p->state = ST_DOC_START_IMPLICIT;
+        }
+        return YAM_OK;
+
+    case ST_DOC_START_EXPLICIT: {
+        /* close previous doc if open */
+        if (p->doc_open) {
+            /* unroll any open collections */
+            if (p->frame_len > 0) {
+                p->unroll_return = ST_DOC_START_EXPLICIT;
+                p->state = ST_UNROLL;
+                return YAM_OK;
+            }
+            evt = evt_simple(YAM_EVT_DOC_END);
+            evt.implicit = true;
+            peek_token(p);
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+            inc_emit(p, evt);
+            p->doc_open = false;
+        }
+        peek_token(p);
+        mark = p->current.start;
+        consume_token(p);
+        evt = evt_simple(YAM_EVT_DOC_START);
+        evt.implicit = false;
+        evt.start = mark;
+        evt.end = p->current.start;
+        inc_emit(p, evt);
+        p->doc_open = true;
+        p->state = ST_DOC_CONTENT;
+        return YAM_OK;
+    }
+
+    case ST_DOC_START_IMPLICIT: {
+        if (p->doc_open) {
+            if (p->frame_len > 0) {
+                p->unroll_return = ST_DOC_START_IMPLICIT;
+                p->state = ST_UNROLL;
+                return YAM_OK;
+            }
+            evt = evt_simple(YAM_EVT_DOC_END);
+            evt.implicit = true;
+            peek_token(p);
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+            inc_emit(p, evt);
+            p->doc_open = false;
+        }
+        peek_token(p);
+        evt = evt_simple(YAM_EVT_DOC_START);
+        evt.implicit = true;
+        evt.start = p->current.start;
+        evt.end = p->current.end;
+        inc_emit(p, evt);
+        p->doc_open = true;
+        p->state = ST_DOC_CONTENT;
+        return YAM_OK;
+    }
+
+    case ST_DOC_CONTENT:
+        peek_token(p);
+        tt = tok_type(p);
+        if (tt == YAM_TOK_DOC_END) {
+            /* empty document body */
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+            inc_emit(p, evt);
+            p->state = ST_DOC_END_EXPLICIT;
+            return YAM_OK;
+        }
+        if (tt == YAM_TOK_DOC_START) {
+            /* empty document body, new doc follows */
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+            inc_emit(p, evt);
+            /* close this doc implicitly */
+            evt = evt_simple(YAM_EVT_DOC_END);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+            inc_emit(p, evt);
+            p->doc_open = false;
+            p->state = ST_STREAM_DOC_LOOP;
+            return YAM_OK;
+        }
+        if (tt == YAM_TOK_STREAM_END) {
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+            inc_emit(p, evt);
+            evt = evt_simple(YAM_EVT_DOC_END);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+            inc_emit(p, evt);
+            p->doc_open = false;
+            p->state = ST_STREAM_END;
+            return YAM_OK;
+        }
+        /* non-trivial content — parse as block node */
+        p->node_return = ST_DOC_END_EXPLICIT;
+        p->state = ST_BLOCK_NODE;
+        return YAM_OK;
+
+    case ST_BLOCK_NODE:
+        /* Consume properties (anchor, tag) */
+        peek_token(p);
+        tt = tok_type(p);
+
+        /* Consume anchor/tag properties */
+        if (tt == YAM_TOK_TAG || tt == YAM_TOK_ANCHOR) {
+            /* Fall back to eager for nodes with properties — the double-props
+             * logic is complex and interacts with collection start detection.
+             * We'll handle the simple (no props) cases incrementally first. */
+            p->state = ST_EAGER_DRAIN;
+            return YAM_OK;
+        }
+
+        if (tt == YAM_TOK_ALIAS) {
+            p->state = ST_BLOCK_NODE_ALIAS;
+            return YAM_OK;
+        }
+
+        if (tt == YAM_TOK_BLOCK_SEQ_ENTRY) {
+            p->state = ST_BLOCK_NODE_SEQ;
+            return YAM_OK;
+        }
+
+        if (tt == YAM_TOK_BLOCK_MAP_KEY) {
+            p->state = ST_BLOCK_NODE_EXPLICIT_KEY;
+            return YAM_OK;
+        }
+
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE) {
+            p->state = ST_BLOCK_NODE_BARE_VALUE;
+            return YAM_OK;
+        }
+
+        if (tt == YAM_TOK_FLOW_SEQ_START || tt == YAM_TOK_FLOW_MAP_START) {
+            /* flow collections → eager fallback */
+            p->state = ST_EAGER_DRAIN;
+            return YAM_OK;
+        }
+
+        if (tt == YAM_TOK_SCALAR) {
+            p->state = ST_BLOCK_NODE_SCALAR;
+            return YAM_OK;
+        }
+
+        /* DOC_START, DOC_END, STREAM_END → empty node */
+        p->state = ST_BLOCK_NODE_EMPTY;
+        return YAM_OK;
+
+    case ST_BLOCK_NODE_SCALAR: {
+        peek_token(p);
+        mark = p->current.start;
+        col = tok_col(p);
+        evt = (yam_event){
+            .type = YAM_EVT_SCALAR,
+            .value = p->current.value,
+            .scalar_style = p->current.scalar_style,
+            .start = p->current.start,
+            .end = p->current.end,
+        };
+        consume_token(p);
+
+        /* peek for ':' → this scalar is a mapping key
+         * Only if ':' col >= scalar col (otherwise ':' belongs to parent map) */
+        peek_token(p);
+        tt = tok_type(p);
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE && tok_col(p) >= col) {
+            p->saved_node = evt;
+            p->saved_node_col = col;
+            p->have_saved_node = true;
+            p->state = ST_BLOCK_NODE_SCALAR_KEY;
+            return YAM_OK;
+        }
+
+        /* plain scalar value */
+        inc_emit(p, evt);
+
+        /* return to parent context */
+        p->state = p->node_return;
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_NODE_SCALAR_KEY: {
+        /* We have a saved scalar that's a key → emit MAPPING_START + key scalar */
+        evt = evt_simple(YAM_EVT_MAPPING_START);
+        evt.implicit = true;
+        evt.start = p->saved_node.start;
+        evt.end = p->saved_node.start;
+        inc_emit(p, evt);
+
+        /* emit the key scalar */
+        inc_emit(p, p->saved_node);
+        p->have_saved_node = false;
+
+        /* push block map context — return to caller's node_return after map ends */
+        inc_push_frame(p, CTX_BLOCK_MAP, p->saved_node_col, p->node_return);
+
+        /* consume ':' and parse value */
+        p->state = ST_BLOCK_MAP_VALUE;
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_NODE_ALIAS: {
+        peek_token(p);
+        mark = p->current.start;
+        col = tok_col(p);
+        evt = (yam_event){
+            .type = YAM_EVT_ALIAS,
+            .value = p->current.value,
+            .start = p->current.start,
+            .end = p->current.end,
+        };
+        consume_token(p);
+
+        /* peek for ':' → alias as mapping key
+         * Only if ':' col >= alias col (otherwise ':' belongs to parent map) */
+        peek_token(p);
+        tt = tok_type(p);
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE && tok_col(p) >= col) {
+            p->saved_node = evt;
+            p->saved_node_col = col;
+            p->have_saved_node = true;
+            p->state = ST_BLOCK_NODE_ALIAS_KEY;
+            return YAM_OK;
+        }
+
+        inc_emit(p, evt);
+
+        /* return to parent context */
+        p->state = p->node_return;
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_NODE_ALIAS_KEY: {
+        evt = evt_simple(YAM_EVT_MAPPING_START);
+        evt.implicit = true;
+        evt.start = p->saved_node.start;
+        evt.end = p->saved_node.start;
+        inc_emit(p, evt);
+        inc_emit(p, p->saved_node);
+        p->have_saved_node = false;
+        inc_push_frame(p, CTX_BLOCK_MAP, p->saved_node_col, p->node_return);
+        p->state = ST_BLOCK_MAP_VALUE;
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_NODE_SEQ: {
+        peek_token(p);
+        int seq_indent = tok_col(p);
+        evt = evt_simple(YAM_EVT_SEQUENCE_START);
+        evt.start = p->current.start;
+        evt.end = p->current.start;
+
+        inc_emit(p, evt);
+        inc_push_frame(p, CTX_BLOCK_SEQ, seq_indent, p->node_return);
+        p->state = ST_BLOCK_SEQ_LOOP;
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_NODE_EXPLICIT_KEY: {
+        /* ? key: starts a mapping */
+        peek_token(p);
+        int map_indent = tok_col(p);
+        evt = evt_simple(YAM_EVT_MAPPING_START);
+        evt.start = p->current.start;
+        evt.end = p->current.start;
+
+        inc_emit(p, evt);
+        inc_push_frame(p, CTX_BLOCK_MAP, map_indent, p->node_return);
+        p->state = ST_BLOCK_MAP_LOOP;
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_NODE_BARE_VALUE: {
+        /* : at start → mapping with empty key */
+        peek_token(p);
+        int map_indent = tok_col(p);
+        evt = evt_simple(YAM_EVT_MAPPING_START);
+        evt.start = p->current.start;
+        evt.end = p->current.start;
+
+        inc_emit(p, evt);
+        inc_push_frame(p, CTX_BLOCK_MAP, map_indent, p->node_return);
+
+        /* emit empty key */
+        evt = evt_simple(YAM_EVT_SCALAR);
+        evt.implicit = true;
+        evt.start = p->current.start;
+        evt.end = p->current.start;
+        inc_emit(p, evt);
+
+        p->state = ST_BLOCK_MAP_VALUE;
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_NODE_EMPTY: {
+        peek_token(p);
+        evt = evt_simple(YAM_EVT_SCALAR);
+        evt.implicit = true;
+        evt.start = p->current.start;
+        evt.end = p->current.end;
+        inc_emit(p, evt);
+
+        /* return to parent context */
+        p->state = p->node_return;
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_MAP_LOOP: {
+        peek_token(p);
+        tt = tok_type(p);
+        col = tok_col(p);
+        top = inc_top_frame(p);
+        int map_indent = top ? top->indent : 0;
+
+        /* check if we're still in this mapping's indent level */
+        if (tt == YAM_TOK_BLOCK_MAP_KEY && col == map_indent) {
+            p->state = ST_BLOCK_MAP_EXPLICIT_KEY;
+            return YAM_OK;
+        }
+
+        if (tt == YAM_TOK_SCALAR || tt == YAM_TOK_ALIAS) {
+            /* Simple key: must be at map indent and followed by ':' */
+            if (col == map_indent) {
+                p->state = ST_BLOCK_MAP_SIMPLE_KEY;
+                return YAM_OK;
+            }
+        }
+
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE && col == map_indent) {
+            /* empty key, value */
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.implicit = true;
+            peek_token(p);
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, evt);
+            p->state = ST_BLOCK_MAP_VALUE;
+            return YAM_OK;
+        }
+
+        if (tt == YAM_TOK_TAG || tt == YAM_TOK_ANCHOR) {
+            /* Properties in mapping → fall back to eager */
+            p->state = ST_EAGER_DRAIN;
+            return YAM_OK;
+        }
+
+        if (tt == YAM_TOK_FLOW_SEQ_START || tt == YAM_TOK_FLOW_MAP_START) {
+            /* Flow key in block mapping → eager fallback */
+            p->state = ST_EAGER_DRAIN;
+            return YAM_OK;
+        }
+
+        /* end of this mapping */
+        p->state = ST_BLOCK_MAP_END;
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_MAP_EXPLICIT_KEY: {
+        /* consume '?' */
+        peek_token(p);
+        consume_token(p);
+
+        /* parse key node */
+        peek_token(p);
+        tt = tok_type(p);
+        top = inc_top_frame(p);
+        int ek_indent = top ? top->indent : 0;
+
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE && tok_col(p) == ek_indent) {
+            /* empty key (: at map indent) */
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, evt);
+            p->state = ST_BLOCK_MAP_VALUE;
+        } else {
+            /* The key is a block node */
+            p->node_return = ST_BLOCK_MAP_POST_KEY;
+            p->state = ST_BLOCK_NODE;
+        }
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_MAP_SIMPLE_KEY: {
+        peek_token(p);
+        tt = tok_type(p);
+
+        if (tt == YAM_TOK_SCALAR) {
+            mark = p->current.start;
+            col = tok_col(p);
+            evt = (yam_event){
+                .type = YAM_EVT_SCALAR,
+                .value = p->current.value,
+                .scalar_style = p->current.scalar_style,
+                .start = p->current.start,
+                .end = p->current.end,
+            };
+            consume_token(p);
+
+            /* must be followed by ':' */
+            peek_token(p);
+            if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
+                inc_emit(p, evt);
+                p->state = ST_BLOCK_MAP_VALUE;
+            } else {
+                /* Not a key — fall back to eager since this shouldn't happen
+                 * in well-formed YAML at the map indent level */
+                p->state = ST_EAGER_DRAIN;
+            }
+        } else if (tt == YAM_TOK_ALIAS) {
+            mark = p->current.start;
+            evt = (yam_event){
+                .type = YAM_EVT_ALIAS,
+                .value = p->current.value,
+                .start = p->current.start,
+                .end = p->current.end,
+            };
+            consume_token(p);
+
+            peek_token(p);
+            if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
+                inc_emit(p, evt);
+                p->state = ST_BLOCK_MAP_VALUE;
+            } else {
+                p->state = ST_EAGER_DRAIN;
+            }
+        } else {
+            p->state = ST_EAGER_DRAIN;
+        }
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_MAP_POST_KEY: {
+        /* After an explicit key's node, look for ':' */
+        peek_token(p);
+        tt = tok_type(p);
+        top = inc_top_frame(p);
+        int map_indent = top ? top->indent : 0;
+
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE && tok_col(p) == map_indent) {
+            p->state = ST_BLOCK_MAP_VALUE;
+        } else {
+            /* missing value → emit empty value, continue loop */
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, evt);
+            p->state = ST_BLOCK_MAP_LOOP;
+        }
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_MAP_VALUE: {
+        /* consume ':' */
+        peek_token(p);
+        if (tok_type(p) != YAM_TOK_BLOCK_MAP_VALUE) {
+            /* missing value — emit empty */
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, evt);
+            p->state = ST_BLOCK_MAP_LOOP;
+            return YAM_OK;
+        }
+        consume_token(p);
+
+        /* peek at what follows */
+        peek_token(p);
+        tt = tok_type(p);
+        col = tok_col(p);
+        top = inc_top_frame(p);
+        int map_indent = top ? top->indent : 0;
+
+        /* empty value: next token at same/less indent, or is doc/stream marker */
+        if (tt == YAM_TOK_DOC_START || tt == YAM_TOK_DOC_END ||
+            tt == YAM_TOK_STREAM_END) {
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, evt);
+            p->state = ST_BLOCK_MAP_LOOP;
+            return YAM_OK;
+        }
+        /* next key/value/scalar/anchor/tag at map indent → empty value */
+        if (col == map_indent && (tt == YAM_TOK_SCALAR ||
+            tt == YAM_TOK_ANCHOR || tt == YAM_TOK_TAG ||
+            tt == YAM_TOK_BLOCK_MAP_KEY || tt == YAM_TOK_BLOCK_MAP_VALUE)) {
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, evt);
+            p->state = ST_BLOCK_MAP_LOOP;
+            return YAM_OK;
+        }
+        /* any token at lesser indent than map → empty value
+         * (seq entries at same indent are valid values per YAML spec) */
+        if (col < map_indent && tt != YAM_TOK_BLOCK_SEQ_ENTRY) {
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, evt);
+            p->state = ST_BLOCK_MAP_LOOP;
+            return YAM_OK;
+        }
+        if (tt == YAM_TOK_BLOCK_SEQ_ENTRY && col < map_indent) {
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, evt);
+            p->state = ST_BLOCK_MAP_LOOP;
+            return YAM_OK;
+        }
+
+        /* the value is a block node — set return to map loop */
+        p->node_return = ST_BLOCK_MAP_LOOP;
+        p->state = ST_BLOCK_NODE;
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_MAP_VALUE_NODE:
+        /* After parsing the value node, continue the map loop */
+        p->state = ST_BLOCK_MAP_LOOP;
+        return YAM_OK;
+
+    case ST_BLOCK_MAP_END: {
+        state_frame frame = inc_pop_frame(p);
+        evt = evt_simple(YAM_EVT_MAPPING_END);
+        peek_token(p);
+        evt.start = p->current.start;
+        evt.end = p->current.end;
+        inc_emit(p, evt);
+
+        /* handle doc close for top-level mapping */
+        p->state = frame.return_state;
+        if (p->state == ST_DOC_END_EXPLICIT) {
+            peek_token(p);
+            tt = tok_type(p);
+            if (tt == YAM_TOK_DOC_END) {
+                consume_token(p);
+                evt = evt_simple(YAM_EVT_DOC_END);
+                evt.implicit = false;
+                evt.start = p->current.start;
+                evt.end = p->current.end;
+                inc_emit(p, evt);
+                p->doc_open = false;
+                p->state = ST_STREAM_DOC_LOOP;
+            } else {
+                evt = evt_simple(YAM_EVT_DOC_END);
+                evt.implicit = true;
+                evt.start = p->current.start;
+                evt.end = p->current.end;
+                inc_emit(p, evt);
+                p->doc_open = false;
+                p->state = ST_STREAM_DOC_LOOP;
+            }
+        }
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_SEQ_LOOP: {
+        peek_token(p);
+        tt = tok_type(p);
+        col = tok_col(p);
+        top = inc_top_frame(p);
+        int seq_indent = top ? top->indent : 0;
+
+        if (tt == YAM_TOK_BLOCK_SEQ_ENTRY && col == seq_indent) {
+            p->state = ST_BLOCK_SEQ_ENTRY;
+            return YAM_OK;
+        }
+
+        /* end of sequence */
+        p->state = ST_BLOCK_SEQ_END;
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_SEQ_ENTRY: {
+        /* consume '-' */
+        peek_token(p);
+        consume_token(p);
+
+        /* peek at what follows */
+        peek_token(p);
+        tt = tok_type(p);
+        col = tok_col(p);
+        top = inc_top_frame(p);
+        int seq_indent = top ? top->indent : 0;
+
+        /* empty entry: next '-' at same indent, or end of seq */
+        if (tt == YAM_TOK_BLOCK_SEQ_ENTRY && col == seq_indent) {
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, evt);
+            p->state = ST_BLOCK_SEQ_LOOP;
+            return YAM_OK;
+        }
+        if (tt == YAM_TOK_DOC_START || tt == YAM_TOK_DOC_END ||
+            tt == YAM_TOK_STREAM_END) {
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.implicit = true;
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, evt);
+            p->state = ST_BLOCK_SEQ_LOOP;
+            return YAM_OK;
+        }
+
+        /* entry has a value node */
+        p->node_return = ST_BLOCK_SEQ_LOOP;
+        p->state = ST_BLOCK_NODE;
+        return YAM_OK;
+    }
+
+    case ST_BLOCK_SEQ_ENTRY_NODE:
+        p->state = ST_BLOCK_SEQ_LOOP;
+        return YAM_OK;
+
+    case ST_BLOCK_SEQ_END: {
+        state_frame frame = inc_pop_frame(p);
+        evt = evt_simple(YAM_EVT_SEQUENCE_END);
+        peek_token(p);
+        evt.start = p->current.start;
+        evt.end = p->current.end;
+        inc_emit(p, evt);
+
+        p->state = frame.return_state;
+        if (p->state == ST_DOC_END_EXPLICIT) {
+            peek_token(p);
+            tt = tok_type(p);
+            if (tt == YAM_TOK_DOC_END) {
+                consume_token(p);
+                evt = evt_simple(YAM_EVT_DOC_END);
+                evt.implicit = false;
+                evt.start = p->current.start;
+                evt.end = p->current.end;
+                inc_emit(p, evt);
+                p->doc_open = false;
+                p->state = ST_STREAM_DOC_LOOP;
+            } else {
+                evt = evt_simple(YAM_EVT_DOC_END);
+                evt.implicit = true;
+                evt.start = p->current.start;
+                evt.end = p->current.end;
+                inc_emit(p, evt);
+                p->doc_open = false;
+                p->state = ST_STREAM_DOC_LOOP;
+            }
+        }
+        return YAM_OK;
+    }
+
+    case ST_UNROLL: {
+        /* Pop one frame per step, emit the corresponding end event */
+        if (p->frame_len > 0) {
+            state_frame frame = inc_pop_frame(p);
+            if (frame.type == CTX_BLOCK_MAP || frame.type == CTX_FLOW_MAP) {
+                evt = evt_simple(YAM_EVT_MAPPING_END);
+            } else {
+                evt = evt_simple(YAM_EVT_SEQUENCE_END);
+            }
+            peek_token(p);
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+            inc_emit(p, evt);
+            return YAM_OK;
+        }
+        /* all frames popped, continue to the return state */
+        p->state = p->unroll_return;
+        return YAM_OK;
+    }
+
+    case ST_DOC_END_EXPLICIT: {
+        peek_token(p);
+        tt = tok_type(p);
+        if (tt == YAM_TOK_DOC_END) {
+            consume_token(p);
+            evt = evt_simple(YAM_EVT_DOC_END);
+            evt.implicit = false;
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+            inc_emit(p, evt);
+        } else {
+            evt = evt_simple(YAM_EVT_DOC_END);
+            evt.implicit = true;
+            peek_token(p);
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+            inc_emit(p, evt);
+        }
+        p->doc_open = false;
+        p->state = ST_STREAM_DOC_LOOP;
+        return YAM_OK;
+    }
+
+    case ST_EAGER_DRAIN:
+        /* Signal to yam_parse_next to fall back to eager mode */
+        return YAM_OK;
+
+    case ST_DONE:
+        return YAM_OK;
+
+    }
+
+    return YAM_ERR_PARSE;
+}
+
 /* ── Public API ──────────────────────────────────────────── */
 
 yam_parser *yam_parser_new(const char *input, size_t len, yam_arena *a) {
@@ -2173,6 +3036,8 @@ yam_parser *yam_parser_new(const char *input, size_t len, yam_arena *a) {
     if (!p->scanner) { free(p); return NULL; }
 
     p->arena = a;
+    p->input = input;
+    p->input_len = len;
     p->have_token = false;
 
     /* ~1 event per 7 input bytes; clamp to [64, 4M] */
@@ -2202,55 +3067,144 @@ yam_parser *yam_parser_new(const char *input, size_t len, yam_arena *a) {
     p->max_events = 10000; /* safety limit */
     p->oom = false;
 
+    /* incremental state machine — use eager mode when merge/alias needed */
+    p->incremental = true;
+    p->state = ST_STREAM_START;
+    p->frame_cap = 16;
+    p->frames = malloc(p->frame_cap * sizeof(state_frame));
+    if (!p->frames) {
+        yam_scanner_free(p->scanner);
+        free(p->contexts); free(p->events); free(p);
+        return NULL;
+    }
+    p->frame_len = 0;
+    p->out_len = 0;
+    p->out_cursor = 0;
+    p->have_saved_node = false;
+
     return p;
 }
 
 yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
-    /* drain queued events first */
-    if (dequeue(p, evt)) return YAM_OK;
-
-    if (p->stream_ended) {
-        *evt = evt_simple(YAM_EVT_NONE);
-        return YAM_OK;
-    }
-
-    /* TODO: eager parsing builds the full event queue on first call, which
-     * increases latency-to-first-event and peak memory for large documents.
-     * An incremental parser would improve both, but requires rethinking
-     * merge/alias resolution which currently needs the complete event array. */
-    if (!p->stream_started) {
-        yam_status st = parse_stream(p);
-        if (st != YAM_OK) return st;
-
-        if (p->merge_enabled) {
-            st = resolve_merges(p);
-            if (st != YAM_OK) return st;
-        }
-        if (p->resolve_enabled) {
-            st = resolve_aliases(p);
-            if (st != YAM_OK) return st;
-        }
-
+    if (!p->incremental) {
+        /* ── Eager path (merge/alias enabled, or fell back from incremental) ── */
         if (dequeue(p, evt)) return YAM_OK;
+        if (p->stream_ended) {
+            *evt = evt_simple(YAM_EVT_NONE);
+            return YAM_OK;
+        }
+        if (!p->stream_started) {
+            yam_status st = parse_stream(p);
+            if (st != YAM_OK) return st;
+            if (p->merge_enabled) {
+                st = resolve_merges(p);
+                if (st != YAM_OK) return st;
+            }
+            if (p->resolve_enabled) {
+                st = resolve_aliases(p);
+                if (st != YAM_OK) return st;
+            }
+            /* skip events already delivered during incremental phase */
+            if (p->events_delivered > 0 && p->evt_cursor < p->events_delivered) {
+                p->evt_cursor = p->events_delivered;
+                p->events_delivered = 0;
+            }
+            if (dequeue(p, evt)) return YAM_OK;
+        }
         *evt = evt_simple(YAM_EVT_NONE);
         return YAM_OK;
     }
 
-    /* stream already parsed, just drain */
-    *evt = evt_simple(YAM_EVT_NONE);
+    /* ── Incremental path (state machine) ── */
+
+    /* drain buffered incremental events */
+    if (p->out_cursor < p->out_len) {
+        *evt = p->out_buf[p->out_cursor++];
+        if (p->out_cursor >= p->out_len) {
+            p->out_len = 0;
+            p->out_cursor = 0;
+        }
+        p->events_delivered++;
+        return YAM_OK;
+    }
+
+    if (p->state == ST_DONE) {
+        *evt = evt_simple(YAM_EVT_NONE);
+        return YAM_OK;
+    }
+
+    /* step the state machine until it produces output or finishes */
+    p->out_len = 0;
+    p->out_cursor = 0;
+    while (p->out_len == 0) {
+        yam_status st = parser_step(p);
+        if (st != YAM_OK) return st;
+        /* check for scanner error ignored by state machine */
+        if (p->scan_error) return p->scan_error;
+
+        if (p->state == ST_EAGER_DRAIN) {
+            /* fall back to eager: re-parse from scratch */
+            int skip = p->events_delivered;
+            p->incremental = false;
+            p->state = ST_DONE;
+            p->stream_started = false;
+            p->stream_ended = false;
+            p->doc_open = false;
+            p->have_token = false;
+            p->evt_len = 0;
+            p->evt_cursor = 0;
+            p->ctx_len = 0;
+            p->has_anchor = false;
+            p->has_tag = false;
+            p->pending_anchor = YAM_STR_NULL;
+            p->pending_tag = YAM_STR_NULL;
+            p->oom = false;
+            p->events_delivered = 0;
+            /* reset scanner to beginning */
+            yam_scanner_free(p->scanner);
+            p->scanner = yam_scanner_new(p->input, p->input_len, p->arena);
+            if (!p->scanner) return YAM_ERR_MEMORY;
+            /* eager parse_stream will be called on the recursive call;
+             * skip events already delivered during incremental phase */
+            p->events_delivered = skip;
+            return yam_parse_next(p, evt);
+        }
+
+        if (p->state == ST_DONE && p->out_len == 0) {
+            *evt = evt_simple(YAM_EVT_NONE);
+            return YAM_OK;
+        }
+    }
+
+    *evt = p->out_buf[0];
+    p->out_cursor = 1;
+    if (p->out_cursor >= p->out_len) {
+        p->out_len = 0;
+        p->out_cursor = 0;
+    }
+    p->events_delivered++;
     return YAM_OK;
 }
 
 void yam_parser_set_schema(yam_parser *p, const yam_schema *schema) {
-    if (p) p->schema = schema;
+    if (p) {
+        p->schema = schema;
+        if (schema) p->incremental = false;
+    }
 }
 
 void yam_parser_set_merge(yam_parser *p, bool enable) {
-    if (p) p->merge_enabled = enable;
+    if (p) {
+        p->merge_enabled = enable;
+        if (enable) p->incremental = false;
+    }
 }
 
 void yam_parser_set_resolve(yam_parser *p, bool enable) {
-    if (p) p->resolve_enabled = enable;
+    if (p) {
+        p->resolve_enabled = enable;
+        if (enable) p->incremental = false;
+    }
 }
 
 void yam_parser_set_max_events(yam_parser *p, int max) {
@@ -2272,5 +3226,6 @@ void yam_parser_free(yam_parser *p) {
     yam_scanner_free(p->scanner);
     free(p->contexts);
     free(p->events);
+    free(p->frames);
     free(p);
 }
