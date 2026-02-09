@@ -2212,6 +2212,10 @@ static yam_status resolve_aliases(yam_parser *p) {
 /* ── Incremental state machine ───────────────────────────── */
 
 static inline void inc_emit(yam_parser *p, yam_event evt) {
+    if (p->max_events > 0 && p->events_delivered + p->out_len >= p->max_events) {
+        p->oom = true;
+        return;
+    }
     if (p->out_len < 8)
         p->out_buf[p->out_len++] = evt;
 }
@@ -3040,11 +3044,9 @@ yam_parser *yam_parser_new(const char *input, size_t len, yam_arena *a) {
     p->input_len = len;
     p->have_token = false;
 
-    /* ~1 event per 7 input bytes; clamp to [64, 4M] */
-    int est = (int)(len / 7);
-    if (est < 64) est = 64;
-    if (est > 4 * 1024 * 1024) est = 4 * 1024 * 1024;
-    p->evt_cap = est;
+    /* defer large allocation — incremental mode rarely needs events[];
+     * eager fallback will grow via enqueue() / realloc as needed */
+    p->evt_cap = 64;
     p->events = malloc(p->evt_cap * sizeof(yam_event));
     if (!p->events) { yam_scanner_free(p->scanner); free(p); return NULL; }
     p->evt_len = 0;
@@ -3139,6 +3141,7 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
     while (p->out_len == 0) {
         yam_status st = parser_step(p);
         if (st != YAM_OK) return st;
+        if (p->oom) return YAM_ERR_MEMORY;
         /* check for scanner error ignored by state machine */
         if (p->scan_error) return p->scan_error;
 
