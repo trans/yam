@@ -7,9 +7,10 @@ CFLAGS  += -Iinclude
 #   make CFLAGS+=-msse4.2     (x86)
 #   make CFLAGS+=-mfpu=neon   (ARM)
 
-SRCDIR  := src
-OBJDIR  := build
-TESTDIR := test
+SRCDIR   := src
+OBJDIR   := build
+TESTDIR  := test
+BENCHDIR := bench
 
 SRCS    := $(wildcard $(SRCDIR)/*.c)
 OBJS    := $(SRCS:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
@@ -23,7 +24,7 @@ TEST_MERGE := $(OBJDIR)/test_merge
 TEST_RESOLVE := $(OBJDIR)/test_resolve
 TEST_ERRORS := $(OBJDIR)/test_errors
 
-.PHONY: all clean test test-suite test-schema test-emitter test-merge test-resolve test-errors test-all bench
+.PHONY: all clean test test-suite test-schema test-emitter test-merge test-resolve test-errors test-all bench bench-parser bench-cmp bench-parser-cmp
 
 all: $(LIB) $(TEST)
 
@@ -39,10 +40,16 @@ $(LIB): $(OBJS)
 $(TEST): $(TESTDIR)/test_scanner.c $(LIB)
 	$(CC) $(CFLAGS) $< -L$(OBJDIR) -lyam -o $@
 
-$(OBJDIR)/bench_scanner: $(TESTDIR)/bench_scanner.c $(LIB)
+$(OBJDIR)/bench_scanner: $(BENCHDIR)/bench_scanner.c $(LIB)
 	$(CC) $(CFLAGS) $< -L$(OBJDIR) -lyam -o $@
 
-$(OBJDIR)/bench_scanner_cmp: $(TESTDIR)/bench_scanner.c $(LIB)
+$(OBJDIR)/bench_scanner_cmp: $(BENCHDIR)/bench_scanner.c $(LIB)
+	$(CC) $(CFLAGS) -DHAS_LIBYAML $< -L$(OBJDIR) -lyam -lyaml -o $@
+
+$(OBJDIR)/bench_parser: $(BENCHDIR)/bench_parser.c $(LIB)
+	$(CC) $(CFLAGS) $< -L$(OBJDIR) -lyam -o $@
+
+$(OBJDIR)/bench_parser_cmp: $(BENCHDIR)/bench_parser.c $(LIB)
 	$(CC) $(CFLAGS) -DHAS_LIBYAML $< -L$(OBJDIR) -lyam -lyaml -o $@
 
 $(TEST_SUITE): $(TESTDIR)/test_yaml_suite.c $(LIB)
@@ -93,11 +100,18 @@ test-errors: $(TEST_ERRORS)
 
 test-all: test test-suite test-schema test-emitter test-merge test-resolve test-errors
 
-bench: $(OBJDIR)/bench_scanner
+bench: $(OBJDIR)/bench_scanner $(OBJDIR)/bench_parser
 	@./$(OBJDIR)/bench_scanner $(SIZE)
+	@./$(OBJDIR)/bench_parser $(SIZE)
+
+bench-parser: $(OBJDIR)/bench_parser
+	@./$(OBJDIR)/bench_parser $(SIZE)
 
 bench-cmp: $(OBJDIR)/bench_scanner_cmp
 	@./$(OBJDIR)/bench_scanner_cmp $(SIZE)
+
+bench-parser-cmp: $(OBJDIR)/bench_parser_cmp
+	@./$(OBJDIR)/bench_parser_cmp $(SIZE)
 
 clean:
 	rm -rf $(OBJDIR)
