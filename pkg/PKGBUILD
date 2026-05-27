@@ -1,0 +1,42 @@
+# Maintainer: Thomas Sawyer <transfire@gmail.com>
+pkgname=yam
+pkgver=0.3.0
+pkgrel=1
+pkgdesc="Fast, minimal, zero-copy YAML 1.2 parser and emitter library in C11"
+arch=('x86_64' 'aarch64')
+url="https://github.com/trans/yam"
+license=('MIT')
+depends=('glibc')
+makedepends=('gcc' 'make')
+# Listing the bare soname lets makepkg auto-append the version (libyam.so=0-64)
+# so dependents can depend on it.
+provides=('libyam.so')
+# Keep the static library (makepkg strips *.a by default via !staticlibs).
+options=('staticlibs')
+source=("${pkgname}-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "${pkgname}-${pkgver}"
+  # SIMD is selected at runtime, so we build with the portable, hardened flags
+  # from makepkg.conf rather than -march=native.
+  make static shared \
+    CFLAGS="${CFLAGS} ${CPPFLAGS}" \
+    LDFLAGS="${LDFLAGS}"
+}
+
+check() {
+  cd "${pkgname}-${pkgver}"
+  # Run the unit tests that don't require the yaml-test-suite submodule
+  # (the submodule is intentionally excluded from the release tarball).
+  make test test-schema test-emitter test-merge test-resolve test-errors \
+    CFLAGS="${CFLAGS} ${CPPFLAGS}" \
+    LDFLAGS="${LDFLAGS}"
+}
+
+package() {
+  cd "${pkgname}-${pkgver}"
+  make install DESTDIR="${pkgdir}" PREFIX=/usr LIBDIR=/usr/lib
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

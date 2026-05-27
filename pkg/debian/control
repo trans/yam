@@ -1,0 +1,35 @@
+Source: yam
+Section: libs
+Priority: optional
+Maintainer: Thomas Sawyer <transfire@gmail.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Homepage: https://github.com/trans/yam
+Rules-Requires-Root: no
+
+Package: libyam0
+Architecture: any
+Multi-Arch: same
+Pre-Depends: ${misc:Pre-Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: fast YAML 1.2 parser and emitter library (runtime)
+ yam is a fast, minimal, zero-copy YAML 1.2 parser and emitter written in C11.
+ It features a SIMD-accelerated scanner (selected at runtime), an event-based
+ parser, an emitter with block/flow/minimal styles, merge key expansion,
+ alias resolution, and an arena allocator.
+ .
+ This package contains the shared library.
+
+Package: libyam-dev
+Section: libdevel
+Architecture: any
+Multi-Arch: same
+Depends: libyam0 (= ${binary:Version}), ${misc:Depends}
+Description: fast YAML 1.2 parser and emitter library (development files)
+ yam is a fast, minimal, zero-copy YAML 1.2 parser and emitter written in C11.
+ It features a SIMD-accelerated scanner (selected at runtime), an event-based
+ parser, an emitter with block/flow/minimal styles, merge key expansion,
+ alias resolution, and an arena allocator.
+ .
+ This package contains the headers, the static library, the development
+ symlink, and the pkg-config file needed to build against yam.

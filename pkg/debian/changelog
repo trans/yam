@@ -1,0 +1,9 @@
+yam (0.3.0-1) unstable; urgency=medium
+
+  * Initial Debian packaging.
+  * Ships libyam as a shared library (libyam0) plus development files
+    (libyam-dev): headers, static library, pkg-config, and dev symlink.
+  * SSE4.2 SIMD scanner path is selected at runtime, so the portable build
+    uses SIMD on capable CPUs without requiring -march=native.
+
+ -- Thomas Sawyer <transfire@gmail.com>  Wed, 27 May 2026 00:00:00 +0000

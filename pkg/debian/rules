@@ -1,0 +1,36 @@
+#!/usr/bin/make -f
+
+# Enable all hardening flags.
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+# Multiarch library directory (e.g. lib/x86_64-linux-gnu).
+DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+
+# Build flags from dpkg-buildflags (exported by dh).
+CFLAGS   ?= $(shell dpkg-buildflags --get CFLAGS)
+CPPFLAGS ?= $(shell dpkg-buildflags --get CPPFLAGS)
+LDFLAGS  ?= $(shell dpkg-buildflags --get LDFLAGS)
+
+%:
+	dh $@
+
+# SIMD is selected at runtime, so the portable dpkg-buildflags (no -march=native)
+# still yield SIMD on capable CPUs.
+override_dh_auto_build:
+	$(MAKE) static shared \
+	  CFLAGS="$(CFLAGS) $(CPPFLAGS)" \
+	  LDFLAGS="$(LDFLAGS)"
+
+override_dh_auto_test:
+	$(MAKE) test test-schema test-emitter test-merge test-resolve test-errors \
+	  CFLAGS="$(CFLAGS) $(CPPFLAGS)" \
+	  LDFLAGS="$(LDFLAGS)"
+
+override_dh_auto_install:
+	$(MAKE) install \
+	  DESTDIR=$(CURDIR)/debian/tmp \
+	  PREFIX=/usr \
+	  LIBDIR=/usr/lib/$(DEB_HOST_MULTIARCH)
+
+override_dh_auto_clean:
+	$(MAKE) clean

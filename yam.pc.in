@@ -1,0 +1,11 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=@LIBDIR@
+includedir=@INCLUDEDIR@
+
+Name: yam
+Description: YAML 1.2 parser and emitter in C11 (fast, minimal, zero-copy)
+URL: https://github.com/trans/yam
+Version: @VERSION@
+Libs: -L${libdir} -lyam
+Cflags: -I${includedir}

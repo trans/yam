@@ -1,4 +1,7 @@
 build/
 *.o
 *.a
+*.so
+*.so.*
 .claude/
+gmon.out

@@ -1,0 +1,15 @@
+# Build artifacts produced by the packaging targets
+*.tar.gz
+*.pkg.tar.zst
+*.pkg.tar.zst.sig
+*.deb
+*.rpm
+*.buildinfo
+*.changes
+*.dsc
+
+# makepkg / dpkg / rpmbuild scratch dirs
+build/
+src/
+pkg/
+rpmbuild/

@@ -1,0 +1,4 @@
+usr/include/yam/*.h
+usr/lib/*/libyam.so
+usr/lib/*/libyam.a
+usr/lib/*/pkgconfig/yam.pc
