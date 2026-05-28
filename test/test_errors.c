@@ -92,6 +92,7 @@ static void test_read_and_parse(void) {
     }
 
     ASSERT(st == YAM_OK, "parse succeeded");
+    ASSERT(scalar_count == 2, "expected exactly 2 scalars (key + value)");
     ASSERT(found_hello, "found 'hello' scalar");
     ASSERT(found_world, "found 'world' scalar");
 
