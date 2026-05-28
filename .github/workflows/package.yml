@@ -81,13 +81,18 @@ jobs:
       - name: Collect Debian artifacts
         run: |
           mkdir -p dist
+          # dh_strip auto-generates a debug-symbol package with a .ddeb
+          # extension on Ubuntu; capture both so it isn't silently dropped.
           cp pkg/build/*.deb dist/
+          cp pkg/build/*.ddeb dist/ 2>/dev/null || true
 
       - name: Upload Debian artifact
         uses: actions/upload-artifact@v7
         with:
           name: yam-deb
-          path: dist/*.deb
+          path: |
+            dist/*.deb
+            dist/*.ddeb
 
   rpm:
     name: RPM packages
@@ -151,4 +156,5 @@ jobs:
           files: |
             yam-arch/*.pkg.tar.zst
             yam-deb/*.deb
+            yam-deb/*.ddeb
             yam-rpm/*.rpm

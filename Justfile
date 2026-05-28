@@ -76,7 +76,7 @@ pkg-deb: dist
     tar -xzf "pkg/yam-{{version}}.tar.gz" -C pkg/build
     cp -a pkg/debian "pkg/build/yam-{{version}}/debian"
     cd "pkg/build/yam-{{version}}" && dpkg-buildpackage -us -uc -b
-    mv pkg/build/*.deb pkg/ 2>/dev/null || true
+    mv pkg/build/*.deb pkg/build/*.ddeb pkg/ 2>/dev/null || true
     mv pkg/build/*.buildinfo pkg/build/*.changes pkg/ 2>/dev/null || true
 
 # Build the RPM packages (yam + yam-devel) with rpmbuild
