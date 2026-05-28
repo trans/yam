@@ -14,7 +14,7 @@ jobs:
       - name: Install dependencies
         run: pacman -Syu --noconfirm --needed git make gcc
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Verify version matches tag
         if: github.event_name == 'release'
@@ -39,7 +39,7 @@ jobs:
           su builder -c "cd '$GITHUB_WORKSPACE/pkg' && makepkg -f --noconfirm"
 
       - name: Upload Arch artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: yam-arch
           path: pkg/*.pkg.tar.zst
@@ -48,7 +48,7 @@ jobs:
     name: Debian packages
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install build dependencies
         run: |
@@ -84,7 +84,7 @@ jobs:
           cp pkg/build/*.deb dist/
 
       - name: Upload Debian artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: yam-deb
           path: dist/*.deb
@@ -97,7 +97,7 @@ jobs:
       - name: Install build dependencies
         run: dnf install -y gcc make rpm-build git
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Verify version matches tag
         if: github.event_name == 'release'
@@ -129,7 +129,7 @@ jobs:
           find ~/rpmbuild/RPMS -name '*.rpm' -exec cp {} dist/ \;
 
       - name: Upload RPM artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: yam-rpm
           path: dist/*.rpm
@@ -143,10 +143,10 @@ jobs:
       contents: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             yam-arch/*.pkg.tar.zst
