@@ -1,3 +1,9 @@
+yam (0.3.1-1) unstable; urgency=medium
+
+  * Add Arch, Debian, and RPM packaging; select the SIMD scanner path at runtime
+
+ -- Thomas Sawyer <transfire@gmail.com>  Wed, 27 May 2026 20:11:05 -0400
+
 yam (0.3.0-1) unstable; urgency=medium
 
   * Initial Debian packaging.

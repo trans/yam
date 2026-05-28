@@ -1,6 +1,6 @@
 # Maintainer: Thomas Sawyer <transfire@gmail.com>
 pkgname=yam
-pkgver=0.3.0
+pkgver=0.3.1
 pkgrel=1
 pkgdesc="Fast, minimal, zero-copy YAML 1.2 parser and emitter library in C11"
 arch=('x86_64' 'aarch64')

@@ -1,5 +1,5 @@
 Name:           yam
-Version:        0.3.0
+Version:        0.3.1
 Release:        1%{?dist}
 Summary:        Fast, minimal, zero-copy YAML 1.2 parser and emitter library in C11
 
@@ -57,6 +57,9 @@ make test test-schema test-emitter test-merge test-resolve test-errors \
 %{_libdir}/pkgconfig/yam.pc
 
 %changelog
+* Wed May 27 2026 Thomas Sawyer <transfire@gmail.com> - 0.3.1-1
+- Add Arch, Debian, and RPM packaging; select the SIMD scanner path at runtime
+
 * Wed May 27 2026 Thomas Sawyer <transfire@gmail.com> - 0.3.0-1
 - Initial RPM packaging (yam shared library + yam-devel development files).
 - SSE4.2 SIMD scanner path is selected at runtime, so the portable build uses

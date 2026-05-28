@@ -21,7 +21,7 @@ extern "C" {
 
 #define YAM_VERSION_MAJOR 0
 #define YAM_VERSION_MINOR 3
-#define YAM_VERSION_PATCH 0
+#define YAM_VERSION_PATCH 1
 
 /* ── String view (zero-copy reference into source) ───────── */
 
