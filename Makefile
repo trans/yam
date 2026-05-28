@@ -204,5 +204,14 @@ bench-cmp: $(OBJDIR)/bench_scanner_cmp
 bench-parser-cmp: $(OBJDIR)/bench_parser_cmp
 	@./$(OBJDIR)/bench_parser_cmp $(SIZE)
 
+# ── Fuzzer ────────────────────────────────────────────────────────────────────
+# Compile the harness together with the library sources, all under
+# libFuzzer + ASAN + UBSAN. Single-shot compile (no .a) so all units share
+# the same instrumentation. Run via `just fuzz`.
+$(OBJDIR)/fuzz_parser: fuzz/fuzz_parser.c $(SRCS) | $(OBJDIR)
+	clang -std=c11 -Wall -Wextra -Iinclude \
+	  -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g -O1 \
+	  $< $(SRCS) -o $@
+
 clean:
 	rm -rf $(OBJDIR)

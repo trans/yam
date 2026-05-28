@@ -12,6 +12,47 @@ build:
 test:
     make test-all
 
+# Run all unit tests under AddressSanitizer + UndefinedBehaviorSanitizer
+sanitize:
+    #!/usr/bin/env bash
+    # Catches heap/stack overflows, use-after-free, signed-integer / alignment /
+    # shift UB, and memory leaks. Uses clang for the most mature ASAN/UBSAN
+    # integration. Cleans first because make doesn't track CFLAGS changes.
+    set -euo pipefail
+    make clean >/dev/null
+    make CC=clang \
+      CFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1" \
+      build/test_scanner build/test_schema build/test_emitter build/test_merge \
+      build/test_resolve build/test_errors build/test_yaml_suite >/dev/null
+    export ASAN_OPTIONS='symbolize=1:halt_on_error=0:detect_leaks=1:strict_string_checks=1'
+    export UBSAN_OPTIONS='print_stacktrace=1:halt_on_error=0'
+    fail=0
+    for t in test_scanner test_schema test_emitter test_merge test_resolve test_errors test_yaml_suite; do
+        printf "── %s ──\n" "$t"
+        out=$(./build/$t 2>&1)
+        hits=$(printf '%s' "$out" | grep -cE 'AddressSanitizer|UndefinedBehaviorSanitizer|LeakSanitizer|runtime error' || true)
+        printf '%s\n' "$out" | tail -2
+        if [ "$hits" -gt 0 ]; then
+            printf '  ⚠ %d sanitizer hit(s)\n' "$hits"
+            fail=1
+        fi
+    done
+    [ "$fail" -eq 0 ] && echo "all clean: 0 sanitizer hits" || { echo "sanitizer found issues"; exit 1; }
+
+# Fuzz the parser with libFuzzer + ASAN + UBSAN for N seconds (default 60)
+fuzz duration='60':
+    #!/usr/bin/env bash
+    # Each crash/oom finding is written to fuzz/crashes/ for inspection;
+    # libFuzzer accumulates an interesting-input corpus under fuzz/corpus/.
+    # Both dirs are gitignored. Replay a finding with: ./build/fuzz_parser path
+    set -euo pipefail
+    mkdir -p fuzz/corpus fuzz/crashes
+    make build/fuzz_parser
+    ./build/fuzz_parser \
+        -max_total_time={{duration}} \
+        -artifact_prefix=fuzz/crashes/ \
+        fuzz/corpus
+
 # Print the version (from include/yam/yam.h)
 version:
     @echo {{version}}

@@ -1,0 +1,4 @@
+# libFuzzer runtime output — corpus grows over time, crash files are
+# per-finding. The harness itself (fuzz_parser.c) is tracked.
+corpus/
+crashes/
