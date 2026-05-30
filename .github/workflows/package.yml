@@ -38,6 +38,16 @@ jobs:
           chown -R builder:builder "$GITHUB_WORKSPACE"
           su builder -c "cd '$GITHUB_WORKSPACE/pkg' && makepkg -f --noconfirm"
 
+      - name: Install package and smoke-test
+        # Catches install-time bugs that build-time checks miss: missing
+        # declared dependencies, scriptlet failures, broken .pc file,
+        # SONAME not findable by the loader after ldconfig.
+        run: |
+          pacman -Sy --noconfirm --needed --quiet pkgconf >/dev/null
+          pacman -U --noconfirm pkg/yam-[0-9]*.pkg.tar.zst
+          gcc $(pkg-config --cflags yam) test/smoke_install.c $(pkg-config --libs yam) -o /tmp/smoke
+          /tmp/smoke
+
       - name: Upload Arch artifact
         uses: actions/upload-artifact@v7
         with:
@@ -86,6 +96,24 @@ jobs:
           cp pkg/build/*.deb dist/
           cp pkg/build/*.ddeb dist/ 2>/dev/null || true
 
+      - name: Install packages and smoke-test (in debian:stable container)
+        # Built on Ubuntu; test install on real Debian via Docker (preinstalled
+        # on ubuntu-latest runners) to catch Ubuntu-specific assumptions in the
+        # deb that wouldn't surface on the same runner.
+        run: |
+          docker run --rm \
+            -v "$PWD/dist:/pkg:ro" \
+            -v "$PWD/test/smoke_install.c:/smoke.c:ro" \
+            debian:stable bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq gcc pkg-config libc6-dev >/dev/null
+              apt-get install -y -qq /pkg/libyam0_*.deb /pkg/libyam-dev_*.deb >/dev/null
+              gcc $(pkg-config --cflags yam) /smoke.c $(pkg-config --libs yam) -o /smoke
+              /smoke
+            '
+
       - name: Upload Debian artifact
         uses: actions/upload-artifact@v7
         with:
@@ -132,6 +160,15 @@ jobs:
         run: |
           mkdir -p dist
           find ~/rpmbuild/RPMS -name '*.rpm' -exec cp {} dist/ \;
+
+      - name: Install packages and smoke-test
+        # Install the runtime + devel rpms (skip debuginfo/debugsource) and
+        # build a downstream program against the installed lib via pkg-config.
+        run: |
+          dnf install -y -q gcc pkgconf-pkg-config \
+            dist/yam-[0-9]*.rpm dist/yam-devel-*.rpm >/dev/null
+          gcc $(pkg-config --cflags yam) test/smoke_install.c $(pkg-config --libs yam) -o /tmp/smoke
+          /tmp/smoke
 
       - name: Upload RPM artifact
         uses: actions/upload-artifact@v7
