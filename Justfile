@@ -39,6 +39,67 @@ sanitize:
     done
     [ "$fail" -eq 0 ] && echo "all clean: 0 sanitizer hits" || { echo "sanitizer found issues"; exit 1; }
 
+# Install the built Arch package in a clean archlinux container and smoke-test it
+test-install-arch:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ls pkg/yam-[0-9]*.pkg.tar.zst >/dev/null 2>&1 || { echo "no Arch package in pkg/ — run 'just pkg-arch' first"; exit 1; }
+    podman run --rm \
+      -v "$PWD/pkg:/pkg:ro" \
+      -v "$PWD/test/smoke_install.c:/smoke.c:ro" \
+      archlinux:base bash -c '
+        set -euo pipefail
+        pacman -Sy --noconfirm --needed --quiet gcc pkgconf >/dev/null
+        pacman -U --noconfirm /pkg/yam-[0-9]*.pkg.tar.zst >/dev/null
+        echo "── installed package ──"
+        pacman -Qi yam | grep -E "^(Name|Version|Depends|Provides)" || true
+        echo "── compile + run ──"
+        gcc $(pkg-config --cflags yam) /smoke.c $(pkg-config --libs yam) -o /smoke
+        /smoke
+      '
+
+# Install the built Debian packages in a clean debian container and smoke-test them
+test-install-deb:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ls pkg/libyam0_*.deb pkg/libyam-dev_*.deb >/dev/null 2>&1 || { echo "no Debian packages in pkg/ — run 'just pkg-deb' first"; exit 1; }
+    podman run --rm \
+      -v "$PWD/pkg:/pkg:ro" \
+      -v "$PWD/test/smoke_install.c:/smoke.c:ro" \
+      debian:stable bash -c '
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq gcc pkg-config libc6-dev >/dev/null
+        apt-get install -y -qq /pkg/libyam0_*.deb /pkg/libyam-dev_*.deb >/dev/null
+        echo "── installed packages ──"
+        dpkg -l libyam0 libyam-dev | tail -3
+        echo "── compile + run ──"
+        gcc $(pkg-config --cflags yam) /smoke.c $(pkg-config --libs yam) -o /smoke
+        /smoke
+      '
+
+# Install the built RPM packages in a clean fedora container and smoke-test them
+test-install-rpm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ls pkg/yam-[0-9]*.rpm pkg/yam-devel-*.rpm >/dev/null 2>&1 || { echo "no RPM packages in pkg/ — run 'just pkg-rpm' first"; exit 1; }
+    podman run --rm \
+      -v "$PWD/pkg:/pkg:ro" \
+      -v "$PWD/test/smoke_install.c:/smoke.c:ro" \
+      fedora:latest bash -c '
+        set -euo pipefail
+        dnf install -y -q gcc pkgconf-pkg-config /pkg/yam-[0-9]*.rpm /pkg/yam-devel-*.rpm >/dev/null
+        echo "── installed packages ──"
+        rpm -qi yam | head -6
+        echo "── compile + run ──"
+        gcc $(pkg-config --cflags yam) /smoke.c $(pkg-config --libs yam) -o /smoke
+        /smoke
+      '
+
+# Run all three install tests
+test-install: test-install-arch test-install-deb test-install-rpm
+
 # Fuzz the parser with libFuzzer + ASAN + UBSAN for N seconds (default 60)
 fuzz duration='60':
     #!/usr/bin/env bash
