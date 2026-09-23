@@ -231,6 +231,9 @@ static bool needs_escape(const char *s, size_t len) {
     return false;
 }
 
+/* Could this text be misread if emitted plain? Only syntax is considered
+ * here; values that would resolve to another type (numbers, true, null)
+ * are handled by choose_style. */
 static bool needs_quoting(const char *s, size_t len, bool flow_ctx) {
     if (len == 0) return true;
 
@@ -243,10 +246,6 @@ static bool needs_quoting(const char *s, size_t len, bool flow_ctx) {
     /* document markers */
     if (len >= 3 && (memcmp(s, "---", 3) == 0 || memcmp(s, "...", 3) == 0))
         return true;
-
-    /* keyword or number */
-    if (is_yaml_keyword(s, len)) return true;
-    if (looks_like_number(s, len)) return true;
 
     for (size_t i = 0; i < len; i++) {
         uint8_t c = (uint8_t)s[i];
@@ -263,9 +262,18 @@ static bool needs_quoting(const char *s, size_t len, bool flow_ctx) {
     return false;
 }
 
+static bool is_str_tag(yam_str tag) {
+    static const char str_tag[] = "tag:yaml.org,2002:str";
+    return tag.len == sizeof(str_tag) - 1 && memcmp(tag.data, str_tag, tag.len) == 0;
+}
+
+/* A plain scalar is emitted plain whenever its text survives that: a plain
+ * event means "resolve by schema", so 8080 or true stay untyped text and
+ * reparse as they came in. Only a scalar tagged !!str that would resolve to
+ * another type (number, bool, null) is quoted to keep it a string. */
 static yam_scalar_style choose_style(yam_scalar_style requested,
                                      const char *val, size_t len,
-                                     bool flow_ctx) {
+                                     bool flow_ctx, yam_str tag) {
     /* literal/folded only in block context */
     if (requested == YAM_SCALAR_LITERAL || requested == YAM_SCALAR_FOLDED) {
         if (flow_ctx) return YAM_SCALAR_DOUBLE_QUOTED;
@@ -275,8 +283,13 @@ static yam_scalar_style choose_style(yam_scalar_style requested,
     if (requested == YAM_SCALAR_DOUBLE_QUOTED) return requested;
 
     /* PLAIN requested — auto-detect */
-    if (!needs_quoting(val, len, flow_ctx))
+    if (len == 0 && !is_str_tag(tag))
+        return YAM_SCALAR_PLAIN;              /* empty (null) node */
+    if (!needs_quoting(val, len, flow_ctx)) {
+        if (is_str_tag(tag) && (is_yaml_keyword(val, len) || looks_like_number(val, len)))
+            return YAM_SCALAR_DOUBLE_QUOTED;
         return YAM_SCALAR_PLAIN;
+    }
 
     /* needs quoting — pick style */
     if (needs_escape(val, len))
@@ -400,13 +413,21 @@ static yam_status emit_scalar(yam_emitter *e, const yam_event *evt) {
     size_t vlen = evt->value.len;
     bool flow_ctx = in_any_flow(e) || e->opts.style != YAM_EMIT_BLOCK;
 
-    yam_scalar_style style = choose_style(evt->scalar_style, val, vlen, flow_ctx);
+    yam_scalar_style style = choose_style(evt->scalar_style, val, vlen, flow_ctx,
+                                          evt->tag);
 
     emit_ctx *ctx = top_ctx(e);
     int indent = ctx ? ctx->indent + e->opts.indent : e->opts.indent;
 
     switch (style) {
     case YAM_SCALAR_PLAIN:
+        if (vlen == 0) {
+            /* empty node: nothing to write, except in a flow sequence
+             * where "[a, ]" would drop the entry, so write ~ (null) */
+            if (ctx && ctx->type == EMIT_CTX_FLOW_SEQ) return buf_put(e, '~');
+            if (e->len > 0 && e->buf[e->len - 1] == ' ') e->len--;
+            return YAM_OK;
+        }
         return emit_plain(e, val, vlen);
     case YAM_SCALAR_SINGLE_QUOTED:
         return emit_single_quoted(e, val, vlen);

@@ -166,14 +166,31 @@ static void test_scalar_quoting(void) {
     yam_arena *a = yam_arena_new(4096);
     yam_emit_opts opts = YAM_EMIT_OPTS_DEFAULT;
 
-    /* keywords should be quoted */
-    yam_str out = roundtrip("val: true\n", opts, a);
-    ASSERT(str_contains(out, "true"), "has true");
+    /* plain scalars stay plain, so they keep their type on reload */
+    yam_str out = roundtrip("port: 8080\nok: true\nnone:\nz: ~\n", opts, a);
+    ASSERT(str_eq(out, "port: 8080\nok: true\nnone:\nz: ~\n"),
+           "plain numbers, bools and nulls are not quoted");
 
-    /* empty value */
+    /* quoted scalars stay strings */
     yam_arena_reset(a);
-    out = roundtrip("key: ''\n", opts, a);
-    ASSERT(str_contains(out, "''") || str_contains(out, "\"\""), "empty quoted");
+    out = roundtrip("s: \"8080\"\nt: 'true'\ne: ''\n", opts, a);
+    ASSERT(str_eq(out, "s: \"8080\"\nt: 'true'\ne: ''\n"), "quoted scalars keep quotes");
+
+    /* a !!str-tagged plain scalar that would resolve to another type is
+     * quoted to stay a string */
+    yam_arena_reset(a);
+    out = roundtrip("t: !!str 42\n", opts, a);
+    ASSERT(str_eq(out, "t: !!str \"42\"\n"), "!!str number is quoted");
+
+    /* an empty (null) entry in a flow sequence is written as ~ */
+    yam_arena_reset(a);
+    out = roundtrip("- a\n-\n", (yam_emit_opts){YAM_EMIT_FLOW, 2, 80, true}, a);
+    ASSERT(str_eq(out, "[a, ~]\n"), "null flow sequence entry is ~");
+
+    /* syntax still forces quotes */
+    yam_arena_reset(a);
+    out = roundtrip("k: \"a: b\"\nl: \"#x\"\n", opts, a);
+    ASSERT(str_eq(out, "k: \"a: b\"\nl: \"#x\"\n"), "unsafe plain text stays quoted");
 
     yam_arena_free(a);
 }
