@@ -158,7 +158,10 @@ typedef struct yam_arena yam_arena;
 /** Create a new arena with the given initial block capacity (min 4096). */
 yam_arena  *yam_arena_new(size_t initial_cap);
 
-/** Allocate @p size bytes with @p align alignment from the arena. */
+/** Allocate @p size bytes with @p align alignment from the arena.
+ *  @p align must be a power of two (0 means 1). Returns NULL if it isn't,
+ *  if the size is too large, or if memory runs out; the arena remains
+ *  usable after a failed allocation. */
 void       *yam_arena_alloc(yam_arena *a, size_t size, size_t align);
 
 /** Duplicate @p len bytes from @p src into the arena (NUL-terminated). */

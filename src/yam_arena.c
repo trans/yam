@@ -6,6 +6,7 @@
  */
 
 #include "yam/yam.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -30,6 +31,7 @@ struct yam_arena {
 /* ── Internal ────────────────────────────────────────────── */
 
 static yam_block *block_new(size_t cap) {
+    if (cap > SIZE_MAX - sizeof(yam_block)) return NULL;
     yam_block *b = (yam_block *)malloc(sizeof(yam_block) + cap);
     if (!b) return NULL;
     b->next = NULL;
@@ -54,17 +56,25 @@ yam_arena *yam_arena_new(size_t initial_cap) {
     return a;
 }
 
+/* Offset within block b at or after `from` whose address is aligned. */
+static size_t aligned_offset(const yam_block *b, size_t from, size_t align) {
+    uintptr_t addr = (uintptr_t)BLOCK_DATA(b) + from;
+    return from + (size_t)((align - (addr & (align - 1))) & (align - 1));
+}
+
 void *yam_arena_alloc(yam_arena *a, size_t size, size_t align) {
+    if (align == 0) align = 1;
+    if (align & (align - 1)) return NULL;            /* not a power of two */
+    if (size > SIZE_MAX - align) return NULL;        /* size + padding overflows */
+
     yam_block *b = a->head;
+    size_t aligned = aligned_offset(b, b->used, align);
 
-    /* align the current position */
-    size_t aligned = (b->used + align - 1) & ~(align - 1);
-
-    if (aligned + size > b->cap) {
+    if (aligned > b->cap || size > b->cap - aligned) {
         /* need a new block — at least double or fit the request */
         size_t cap = a->default_cap;
         if (cap < size + align) cap = size + align;
-        if (cap < b->cap * 2) cap = b->cap * 2;
+        if (b->cap <= SIZE_MAX / 2 && cap < b->cap * 2) cap = b->cap * 2;
 
         yam_block *nb = block_new(cap);
         if (!nb) return NULL;
@@ -73,7 +83,7 @@ void *yam_arena_alloc(yam_arena *a, size_t size, size_t align) {
         a->blocks = nb;
         a->head   = nb;
         b = nb;
-        aligned = 0;
+        aligned = aligned_offset(b, 0, align);
     }
 
     void *ptr = BLOCK_DATA(b) + aligned;
@@ -82,6 +92,7 @@ void *yam_arena_alloc(yam_arena *a, size_t size, size_t align) {
 }
 
 char *yam_arena_dup(yam_arena *a, const char *src, size_t len) {
+    if (len == SIZE_MAX) return NULL;
     char *dst = (char *)yam_arena_alloc(a, len + 1, 1);
     if (!dst) return NULL;
     memcpy(dst, src, len);

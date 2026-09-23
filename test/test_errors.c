@@ -379,6 +379,35 @@ static void test_bom(void) {
     }
 }
 
+/* ── Arena limits ──────────────────────────────────────────── */
+
+#include <stdint.h>
+
+/* Huge sizes used to wrap around and return overlapping memory. */
+static void test_arena_limits(void) {
+    printf("test_arena_limits:\n");
+    yam_arena *a = yam_arena_new(4096);
+    ASSERT(yam_arena_alloc(a, SIZE_MAX, 1) == NULL, "SIZE_MAX allocation fails");
+    ASSERT(yam_arena_alloc(a, SIZE_MAX - 8, 1) == NULL, "near-SIZE_MAX allocation fails");
+    ASSERT(yam_arena_alloc(a, SIZE_MAX / 2 + 1, 16) == NULL, "oversized aligned allocation fails");
+    ASSERT(yam_arena_alloc(a, 16, 3) == NULL, "non-power-of-two alignment fails");
+    ASSERT(yam_arena_dup(a, "x", SIZE_MAX) == NULL, "SIZE_MAX dup fails");
+    ASSERT(yam_arena_new(SIZE_MAX) == NULL, "SIZE_MAX arena fails");
+
+    /* still usable, and alignment holds on the actual address */
+    bool aligned = true;
+    for (int i = 0; i < 2000; i++) {
+        yam_arena_alloc(a, (size_t)(i % 7) + 1, 1);
+        size_t al = (size_t)1 << (i % 7);         /* 1 .. 64 */
+        void *ptr = yam_arena_alloc(a, 24, al);
+        if (!ptr || ((uintptr_t)ptr & (al - 1))) aligned = false;
+    }
+    ASSERT(aligned, "allocations are aligned to the requested boundary");
+    char *d = yam_arena_dup(a, "hello", 5);
+    ASSERT(d && strcmp(d, "hello") == 0, "arena works after failed allocations");
+    yam_arena_free(a);
+}
+
 /* ── Main ───────────────────────────────────────────────────── */
 
 int main(void) {
@@ -405,6 +434,7 @@ int main(void) {
     /* fuzzer regressions */
     test_block_scalar_trailing_spaces();
     test_bom();
+    test_arena_limits();
 
     printf("\n--- Error tests: %d / %d passed ---\n", tests_passed, tests_run);
     if (tests_failed > 0) printf("    %d FAILED\n", tests_failed);
