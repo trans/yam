@@ -88,6 +88,7 @@ typedef enum {
     YAM_TOK_TAG,             /**< @c !tag or @c !!type */
     YAM_TOK_ANCHOR,          /**< @c &name */
     YAM_TOK_ALIAS,           /**< @c *name */
+    YAM_TOK_DIRECTIVE,       /**< @c %YAML / @c %TAG line; value is the whole line */
 } yam_token_type;
 
 /* ── Scalar style ────────────────────────────────────────── */

@@ -881,19 +881,18 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
         return YAM_OK;
     }
 
-    /* directive lines: % at column 1 in block context → consume whole line as scalar */
+    /* directive lines: % at column 1 in block context → one token holding
+     * the whole line; the parser validates it */
     if (c == '%' && s->col == 1 && s->flow_level == 0) {
-        const char *scalar_start = BUF_AT(s);
-        size_t len = 0;
-        while (!AT_END(s) && !yam_is_break(PEEK(s))) {
-            advance(s, 1);
-            len++;
-        }
-        tok->type = YAM_TOK_SCALAR;
-        tok->start = start;
-        tok->end = mark(s);
-        tok->value = (yam_str){scalar_start, len};
-        tok->scalar_style = YAM_SCALAR_PLAIN;
+        const char *line_start = BUF_AT(s);
+        size_t len = yam_scan_to_break(line_start, REMAINING(s));
+        advance_cols(s, len);
+        *tok = (yam_token){
+            .type  = YAM_TOK_DIRECTIVE,
+            .value = {line_start, len},
+            .start = start,
+            .end   = mark(s),
+        };
         return YAM_OK;
     }
 
@@ -1329,6 +1328,7 @@ const char *yam_token_type_str(yam_token_type t) {
         case YAM_TOK_TAG:             return "TAG";
         case YAM_TOK_ANCHOR:          return "ANCHOR";
         case YAM_TOK_ALIAS:           return "ALIAS";
+        case YAM_TOK_DIRECTIVE:       return "DIRECTIVE";
     }
     return "UNKNOWN";
 }

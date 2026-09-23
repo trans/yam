@@ -430,6 +430,24 @@ static yam_str expand_tag(yam_parser *p, yam_str raw) {
     return raw;
 }
 
+/* A named handle (!name!suffix) must be declared by a %TAG directive of
+ * the current document; ! and !! are always available. */
+static bool tag_handle_declared(const yam_parser *p, yam_str raw) {
+    if (raw.len < 3 || raw.data[0] != '!' || raw.data[1] == '!' || raw.data[1] == '<')
+        return true;
+    size_t hlen = 0;
+    for (size_t i = 1; i < raw.len; i++) {
+        if (raw.data[i] == '!') { hlen = i + 1; break; }
+    }
+    if (hlen == 0) return true; /* local tag: !suffix */
+    for (int i = 0; i < p->tag_dir_count; i++) {
+        if (strlen(p->tag_directives[i].handle) == hlen &&
+            memcmp(p->tag_directives[i].handle, raw.data, hlen) == 0)
+            return true;
+    }
+    return false;
+}
+
 static yam_status consume_props(yam_parser *p) {
     /* Consume at most one anchor and one tag per node */
     for (;;) {
@@ -454,6 +472,8 @@ static yam_status consume_props(yam_parser *p) {
                 p->props_col = tok_col(p);
                 p->props_start = p->current.start;
             }
+            if (!tag_handle_declared(p, p->current.value))
+                PARSE_ERROR(p, "undefined tag handle");
             p->pending_tag = expand_tag(p, p->current.value);
             p->has_tag = true;
             consume_token(p);
@@ -1598,56 +1618,113 @@ static yam_status expect_document_end(yam_parser *p) {
     return YAM_OK;
 }
 
+/* Split the next whitespace-separated word of a directive line. Stops at
+ * a comment ('#' after whitespace). Returns false when no word is left. */
+static bool directive_word(const char **cur, const char *end,
+                           const char **word, size_t *len) {
+    const char *s = *cur;
+    bool blank = false;
+    while (s < end && (*s == ' ' || *s == '\t')) { s++; blank = true; }
+    if (s >= end || (blank && *s == '#')) { *cur = end; return false; }
+    *word = s;
+    while (s < end && *s != ' ' && *s != '\t') s++;
+    *len = (size_t)(s - *word);
+    *cur = s;
+    return true;
+}
+
+/* Validate a directive line and apply it. */
+static yam_status parse_directive(yam_parser *p, bool *had_yaml) {
+    yam_str line = p->current.value;
+    const char *cur = line.data + 1, *end = line.data + line.len;
+    const char *name, *w1, *w2, *extra;
+    size_t name_len, l1, l2, lx;
+
+    if (!directive_word(&cur, end, &name, &name_len) || name != line.data + 1)
+        PARSE_ERROR(p, "invalid directive");
+
+    if (name_len == 4 && memcmp(name, "YAML", 4) == 0) {
+        if (*had_yaml) PARSE_ERROR(p, "duplicate %YAML directive");
+        *had_yaml = true;
+        if (!directive_word(&cur, end, &w1, &l1))
+            PARSE_ERROR(p, "%YAML directive requires a version");
+        size_t i = 0, dot = 0;
+        while (i < l1 && w1[i] >= '0' && w1[i] <= '9') i++;
+        dot = i;
+        if (dot == 0 || dot >= l1 || w1[dot] != '.')
+            PARSE_ERROR(p, "invalid %YAML version");
+        i = dot + 1;
+        while (i < l1 && w1[i] >= '0' && w1[i] <= '9') i++;
+        if (i != l1 || i == dot + 1)
+            PARSE_ERROR(p, "invalid %YAML version");
+        if (directive_word(&cur, end, &extra, &lx))
+            PARSE_ERROR(p, "unexpected text after %YAML version");
+        return YAM_OK;
+    }
+
+    if (name_len == 3 && memcmp(name, "TAG", 3) == 0) {
+        if (!directive_word(&cur, end, &w1, &l1) ||
+            !directive_word(&cur, end, &w2, &l2))
+            PARSE_ERROR(p, "%TAG directive requires a handle and a prefix");
+        if (directive_word(&cur, end, &extra, &lx))
+            PARSE_ERROR(p, "unexpected text after %TAG prefix");
+        /* handle: !, !!, or !word! */
+        bool ok = w1[0] == '!' && w1[l1 - 1] == '!';
+        for (size_t i = 1; ok && i + 1 < l1; i++) {
+            char c = w1[i];
+            ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                 (c >= 'A' && c <= 'Z') || c == '-';
+        }
+        if (!ok) PARSE_ERROR(p, "invalid %TAG handle");
+        if (l1 >= 16 || l2 >= 256) PARSE_ERROR(p, "%TAG handle or prefix too long");
+
+        int idx = -1;
+        for (int i = 0; i < p->tag_dir_count; i++) {
+            if (strlen(p->tag_directives[i].handle) == l1 &&
+                memcmp(p->tag_directives[i].handle, w1, l1) == 0) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx < 0) {
+            if (p->tag_dir_count >= 8) PARSE_ERROR(p, "too many %TAG directives");
+            idx = p->tag_dir_count++;
+        }
+        memcpy(p->tag_directives[idx].handle, w1, l1);
+        p->tag_directives[idx].handle[l1] = '\0';
+        memcpy(p->tag_directives[idx].prefix, w2, l2);
+        p->tag_directives[idx].prefix[l2] = '\0';
+        return YAM_OK;
+    }
+
+    /* other directives are reserved; the spec says to ignore them */
+    return YAM_OK;
+}
+
 static yam_status parse_document(yam_parser *p) {
     if (p->oom) return OOM_STATUS(p);
     yam_status st = peek_token(p);
     if (st != YAM_OK) return st;
 
-    /* parse directives (%YAML, %TAG) — only plain scalars at col 1 */
-    while (tok_type(p) == YAM_TOK_SCALAR &&
-           p->current.scalar_style == YAM_SCALAR_PLAIN &&
-           p->current.start.col == 1 &&
-           p->current.value.len > 0 && p->current.value.data[0] == '%') {
-        yam_str val = p->current.value;
-        /* parse %TAG handle prefix */
-        if (val.len > 5 && memcmp(val.data, "%TAG ", 5) == 0) {
-            const char *s = val.data + 5;
-            const char *end = val.data + val.len;
-            /* skip spaces */
-            while (s < end && *s == ' ') s++;
-            /* read handle (e.g., "!", "!!", "!e!") */
-            const char *h_start = s;
-            while (s < end && *s != ' ') s++;
-            size_t hlen = s - h_start;
-            /* skip spaces */
-            while (s < end && *s == ' ') s++;
-            /* read prefix */
-            const char *p_start = s;
-            while (s < end && *s != ' ' && *s != '\n') s++;
-            size_t plen = s - p_start;
+    /* a new document starts here (unless this is only a '...' or the end
+     * of the stream); %TAG handles apply to the next document only */
+    if (tok_type(p) != YAM_TOK_DOC_END && tok_type(p) != YAM_TOK_STREAM_END)
+        p->tag_dir_count = 0;
 
-            if (hlen > 0 && hlen < 16 && plen > 0 && plen < 256 &&
-                p->tag_dir_count < 8) {
-                int idx = -1;
-                /* check if handle already exists, replace if so */
-                for (int i = 0; i < p->tag_dir_count; i++) {
-                    if (strlen(p->tag_directives[i].handle) == hlen &&
-                        memcmp(p->tag_directives[i].handle, h_start, hlen) == 0) {
-                        idx = i;
-                        break;
-                    }
-                }
-                if (idx < 0) idx = p->tag_dir_count++;
-                memcpy(p->tag_directives[idx].handle, h_start, hlen);
-                p->tag_directives[idx].handle[hlen] = '\0';
-                memcpy(p->tag_directives[idx].prefix, p_start, plen);
-                p->tag_directives[idx].prefix[plen] = '\0';
-            }
-        }
+    /* directives (%YAML, %TAG) */
+    bool had_directive = false, had_yaml = false;
+    while (tok_type(p) == YAM_TOK_DIRECTIVE) {
+        if (p->doc_open)
+            PARSE_ERROR(p, "directive requires a preceding document end marker '...'");
+        st = parse_directive(p, &had_yaml);
+        if (st != YAM_OK) return st;
+        had_directive = true;
         consume_token(p);
         st = peek_token(p);
         if (st != YAM_OK) return st;
     }
+    if (had_directive && tok_type(p) != YAM_TOK_DOC_START)
+        PARSE_ERROR(p, "directives must be followed by a document start marker '---'");
 
     if (tok_type(p) == YAM_TOK_DOC_START) {
         /* explicit doc start */
@@ -1674,6 +1751,8 @@ static yam_status parse_document(yam_parser *p) {
         st = peek_token(p);
         if (st != YAM_OK) return st;
 
+        if (tok_type(p) == YAM_TOK_DIRECTIVE)
+            PARSE_ERROR(p, "directive requires a preceding document end marker '...'");
         if (tok_type(p) == YAM_TOK_STREAM_END ||
             tok_type(p) == YAM_TOK_DOC_END ||
             tok_type(p) == YAM_TOK_DOC_START) {
@@ -3092,10 +3171,7 @@ static yam_status parser_step(yam_parser *p) {
         /* check for %TAG / %YAML directives — fall back to eager */
         peek_token(p);
         tt = tok_type(p);
-        if ((tt == YAM_TOK_TAG && p->current.value.len > 0 &&
-             p->current.value.data[0] == '%') ||
-            (tt == YAM_TOK_SCALAR && p->current.value.len > 0 &&
-             p->current.value.data[0] == '%')) {
+        if (tt == YAM_TOK_DIRECTIVE) {
             p->state = ST_EAGER_DRAIN;
             return YAM_OK;
         }
@@ -3273,6 +3349,8 @@ static yam_status parser_step(yam_parser *p) {
         if (tt == YAM_TOK_FLOW_SEQ_END || tt == YAM_TOK_FLOW_MAP_END ||
             tt == YAM_TOK_FLOW_ENTRY)
             PARSE_ERROR(p, "unexpected flow indicator outside a flow collection");
+        if (tt == YAM_TOK_DIRECTIVE)
+            PARSE_ERROR(p, "directive requires a preceding document end marker '...'");
 
         /* DOC_START, DOC_END, STREAM_END → empty node */
         p->state = ST_BLOCK_NODE_EMPTY;
