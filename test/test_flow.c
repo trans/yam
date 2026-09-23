@@ -197,6 +197,7 @@ static void test_deep_nesting_linear(void) {
     yam_arena  *a = yam_arena_new(4096);
     yam_parser *p = yam_parser_new(buf, (size_t)depth * 2 + 1, a);
     yam_parser_set_max_events(p, 0);
+    yam_parser_set_max_depth(p, 0);
     yam_event evt;
     yam_status st;
     int events = 0;
@@ -215,6 +216,103 @@ static void test_deep_nesting_linear(void) {
     free(buf);
 }
 
+/* ── Safety limits ─────────────────────────────────────────── */
+
+static yam_status parse_all(const char *yaml, size_t len, bool eager,
+                            int max_depth, const char **msg) {
+    yam_arena  *a = yam_arena_new(4096);
+    yam_parser *p = yam_parser_new(yaml, len, a);
+    if (eager) yam_parser_set_merge(p, true);
+    yam_parser_set_max_events(p, 0);
+    if (max_depth >= 0) yam_parser_set_max_depth(p, max_depth);
+    yam_event evt;
+    yam_status st;
+    int guard = 0;
+    while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
+           evt.type != YAM_EVT_STREAM_END && evt.type != YAM_EVT_NONE &&
+           ++guard < 10000000)
+        ;
+    static char buf[256];
+    const char *m = yam_parser_error(p);
+    snprintf(buf, sizeof buf, "%s", m ? m : "");
+    *msg = buf;
+    yam_parser_free(p);
+    yam_arena_free(a);
+    return st;
+}
+
+/* Deep nesting stops with YAM_ERR_LIMIT in both parse modes; the eager
+ * (recursive) mode used to overflow the stack. */
+static void test_depth_limit(void) {
+    printf("test_depth_limit:\n");
+    int depth = 100000;
+    char *buf = malloc((size_t)depth * 4);
+    for (int i = 0; i < depth; i++) memcpy(buf + i * 4, "!t [", 4);
+    const char *msg;
+
+    for (int eager = 0; eager <= 1; eager++) {
+        yam_status st = parse_all(buf, (size_t)depth * 4, eager, -1, &msg);
+        ASSERT(st == YAM_ERR_LIMIT, "deep nesting hits the depth limit");
+        ASSERT(strstr(msg, "depth") != NULL, "depth limit has an error message");
+    }
+
+    /* exactly at the limit is fine */
+    char ok[2 * 8 + 2];
+    memset(ok, '[', 8);
+    memset(ok + 8, ']', 8);
+    ok[16] = '\0';
+    ASSERT(parse_all(ok, 16, false, 8, &msg) == YAM_OK, "depth == limit parses");
+    ASSERT(parse_all(ok, 16, true, 8, &msg) == YAM_OK, "depth == limit parses (eager)");
+    ASSERT(parse_all(ok, 16, false, 7, &msg) == YAM_ERR_LIMIT, "depth > limit fails");
+    ASSERT(parse_all(ok, 16, true, 7, &msg) == YAM_ERR_LIMIT, "depth > limit fails (eager)");
+    free(buf);
+}
+
+/* Hitting the event limit reports YAM_ERR_LIMIT with a message. */
+static void test_event_limit(void) {
+    printf("test_event_limit:\n");
+    const char *yaml = "[a, b, c, d, e, f, g, h, i, j]";
+    for (int eager = 0; eager <= 1; eager++) {
+        yam_arena  *a = yam_arena_new(4096);
+        yam_parser *p = yam_parser_new(yaml, strlen(yaml), a);
+        if (eager) yam_parser_set_merge(p, true);
+        yam_parser_set_max_events(p, 5);
+        yam_event evt;
+        yam_status st;
+        while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
+               evt.type != YAM_EVT_STREAM_END && evt.type != YAM_EVT_NONE)
+            ;
+        ASSERT(st == YAM_ERR_LIMIT, "event limit returns YAM_ERR_LIMIT");
+        const char *m = yam_parser_error(p);
+        ASSERT(m && strstr(m, "event limit"), "event limit has an error message");
+        yam_parser_free(p);
+        yam_arena_free(a);
+    }
+}
+
+/* Stray flow indicators outside a flow collection are errors, not an
+ * endless stream of empty nodes. */
+static void test_stray_flow_indicators(void) {
+    printf("test_stray_flow_indicators:\n");
+    const char *cases[] = { "]", "}", ",", "{a: b}}", "[a]\n]", "a: b\n}",
+                            "!!str,", "&a ,", "- !!str, xxx" };
+    const char *msg;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        for (int eager = 0; eager <= 1; eager++) {
+            yam_status st = parse_all(cases[i], strlen(cases[i]), eager, -1, &msg);
+            tests_run++;
+            if (st != YAM_ERR_PARSE) {
+                printf("  FAIL: %s (%s): status %d\n", cases[i],
+                       eager ? "eager" : "incremental", st);
+                tests_failed++;
+            } else {
+                tests_passed++;
+            }
+        }
+    }
+    check("a ]", "a ]");  /* ] is fine inside a block plain scalar */
+}
+
 /* ── Main ───────────────────────────────────────────────────── */
 
 int main(void) {
@@ -225,6 +323,9 @@ int main(void) {
     test_quoted_values();
     test_error_after_events();
     test_deep_nesting_linear();
+    test_depth_limit();
+    test_event_limit();
+    test_stray_flow_indicators();
 
     printf("\n--- Flow tests: %d / %d passed ---\n", tests_passed, tests_run);
     if (tests_failed > 0) printf("    %d FAILED\n", tests_failed);

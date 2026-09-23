@@ -203,11 +203,14 @@ Scalar, mapping, and sequence aliases are all expanded. Circular and unknown
 references are kept as `ALIAS` events (no error, no infinite loop). Combines
 with merge keys when both are enabled.
 
-## Event Limit
+## Safety Limits
 
-The parser defaults to a maximum of 10,000 events as a safety limit against
-runaway inputs. This is sufficient for typical config files (roughly
-100-200KB of dense YAML), but large documents may need a higher limit:
+The parser enforces limits against hostile or runaway input. Exceeding any
+of them stops parsing with `YAM_ERR_LIMIT` and an error message.
+
+**Event count.** Defaults to 10,000 events. This is sufficient for typical
+config files (roughly 100-200KB of dense YAML), but large documents may
+need a higher limit:
 
 ```c
 yam_parser_set_max_events(parser, 100000);  /* raise for large files */
@@ -218,6 +221,21 @@ Each YAML node produces 1-3 events (a key-value pair is ~2 events, plus
 structure start/end events), so the default 10,000 events handles roughly
 3,000-5,000 nodes. Documents with large string values use fewer events per
 byte and can go well beyond 200KB at the default limit.
+
+**Nesting depth.** Defaults to 256 levels of nested collections:
+
+```c
+yam_parser_set_max_depth(parser, 1000);
+```
+
+Setting it to 0 disables the limit, but inputs using tags, anchors, merge
+keys, or alias resolution are parsed recursively (roughly 1 KB of stack per
+level), so very deep input can then overflow the stack.
+
+**Alias and merge expansion.** Expanding aliases can grow a small document
+exponentially (the "billion laughs" attack). The expanded stream must fit
+within the event limit; if that is disabled, expansion is capped at 16
+times the unexpanded stream plus 100,000 events.
 
 ## Error Handling
 

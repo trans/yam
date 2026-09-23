@@ -319,6 +319,37 @@ static void test_no_parser_error(void) {
     yam_arena_free(a);
 }
 
+/* ── Block scalar ending in spaces (fuzzer regression) ─────── */
+
+/* A block scalar whose last line is only spaces, with no final newline,
+ * used to overflow its arena buffer: the sizing pass counted the line as
+ * empty while the copy pass kept the spaces beyond the indent. */
+static void test_block_scalar_trailing_spaces(void) {
+    printf("test_block_scalar_trailing_spaces:\n");
+    const char *cases[][2] = {
+        { ">\n a\n   ",   "a\n  \n" },
+        { "|\n a\n   ",   "a\n  \n" },
+        { "|+\n a\n     ", "a\n    \n" },
+        { ">\ntext\n         ", "text\n         \n" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        yam_arena *a = yam_arena_new(4096);
+        yam_parser *p = yam_parser_new(cases[i][0], strlen(cases[i][0]), a);
+        yam_event evt;
+        yam_str val = YAM_STR_NULL;
+        yam_status st;
+        while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
+               evt.type != YAM_EVT_STREAM_END && evt.type != YAM_EVT_NONE)
+            if (evt.type == YAM_EVT_SCALAR) val = evt.value;
+        ASSERT(st == YAM_OK, "block scalar ending in spaces parses");
+        ASSERT(val.len == strlen(cases[i][1]) &&
+               memcmp(val.data, cases[i][1], val.len) == 0,
+               "block scalar ending in spaces keeps the extra spaces");
+        yam_parser_free(p);
+        yam_arena_free(a);
+    }
+}
+
 /* ── Main ───────────────────────────────────────────────────── */
 
 int main(void) {
@@ -341,6 +372,9 @@ int main(void) {
     /* no error */
     test_no_scanner_error();
     test_no_parser_error();
+
+    /* fuzzer regressions */
+    test_block_scalar_trailing_spaces();
 
     printf("\n--- Error tests: %d / %d passed ---\n", tests_passed, tests_run);
     if (tests_failed > 0) printf("    %d FAILED\n", tests_failed);

@@ -48,6 +48,8 @@ typedef enum {
     YAM_ERR_SCAN,       /**< Scanner error (malformed YAML). */
     YAM_ERR_PARSE,      /**< Parser error (structural YAML error). */
     YAM_ERR_EMIT,       /**< Emitter error (invalid event sequence). */
+    YAM_ERR_LIMIT,      /**< A safety limit was exceeded (event count,
+                             nesting depth, or alias expansion). */
 } yam_status;
 
 /* ── Source location ─────────────────────────────────────── */
@@ -310,8 +312,16 @@ void        yam_parser_set_resolve(yam_parser *p, bool enable);
 
 /** Set the maximum number of events before the parser stops with an error.
  *  Default is 10,000. Set to 0 to disable the limit.
- *  @see README "Event Limit" for sizing guidance. */
+ *  Exceeding it returns YAM_ERR_LIMIT; alias/merge expansion is bounded
+ *  by the same limit. @see README "Safety Limits" for sizing guidance. */
 void        yam_parser_set_max_events(yam_parser *p, int max);
+
+/** Set the maximum nesting depth of collections. Exceeding it stops the
+ *  parser with YAM_ERR_LIMIT. Default is 256. Set to 0 to disable the
+ *  limit, but note that some inputs (tags, anchors, merge keys, alias
+ *  resolution) are parsed recursively, using roughly 1 KB of stack per
+ *  level, so very deep input can then overflow the stack. */
+void        yam_parser_set_max_depth(yam_parser *p, int max);
 
 /** Error message from the last failed parse, or NULL. */
 const char *yam_parser_error(yam_parser *p);

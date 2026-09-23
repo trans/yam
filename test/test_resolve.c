@@ -306,6 +306,46 @@ static void test_self_reference(void) {
     ASSERT(has_alias(&el), "self-referential alias kept");
 }
 
+/* ── Test: Exponential expansion ("billion laughs") ─────── */
+
+/* Each level holds ten aliases to the previous one, so the expanded stream
+ * grows 10x per level. Expansion must stop at a limit, promptly, whether
+ * or not the event limit is enabled. */
+static void test_billion_laughs(void) {
+    printf("test_billion_laughs:\n");
+    char yaml[4096];
+    size_t n = 0;
+    n += snprintf(yaml + n, sizeof yaml - n, "a0: &a0 [x, x, x, x, x, x, x, x, x, x]\n");
+    for (int i = 1; i < 12; i++) {
+        n += snprintf(yaml + n, sizeof yaml - n, "a%d: &a%d [", i, i);
+        for (int k = 0; k < 10; k++)
+            n += snprintf(yaml + n, sizeof yaml - n, "%s*a%d", k ? ", " : "", i - 1);
+        n += snprintf(yaml + n, sizeof yaml - n, "]\n");
+    }
+
+    for (int max = 0; max <= 1; max++) {
+        for (int merge = 0; merge <= 1; merge++) {
+            yam_arena *a = yam_arena_new(4096);
+            yam_parser *p = yam_parser_new(yaml, n, a);
+            yam_parser_set_resolve(p, true);
+            if (merge) yam_parser_set_merge(p, true);
+            if (!max) yam_parser_set_max_events(p, 0);
+
+            yam_event evt;
+            yam_status st;
+            while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
+                   evt.type != YAM_EVT_STREAM_END && evt.type != YAM_EVT_NONE)
+                ;
+            ASSERT(st == YAM_ERR_LIMIT, "exponential alias expansion hits a limit");
+            const char *msg = yam_parser_error(p);
+            ASSERT(msg && strstr(msg, "expansion"), "expansion limit has a message");
+
+            yam_parser_free(p);
+            yam_arena_free(a);
+        }
+    }
+}
+
 /* ── Main ────────────────────────────────────────────────── */
 
 int main(void) {
@@ -322,6 +362,7 @@ int main(void) {
     test_alias_in_seq();
     test_circular();
     test_self_reference();
+    test_billion_laughs();
 
     printf("\n--- Resolve tests: %d / %d passed ---\n", tests_passed, tests_run);
     if (tests_failed > 0) printf("    %d FAILED\n", tests_failed);

@@ -1081,8 +1081,9 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
             int li = 0;
             while (s->pos + li < s->len && s->buf[s->pos + li] == ' ') li++;
             if (s->pos + li >= s->len) {
-                /* trailing blank line at end */
-                needed++;
+                /* trailing blank line at end; as in the copy pass below,
+                 * spaces beyond base_indent are content */
+                needed += (li > base_indent ? (size_t)(li - base_indent) : 0) + 1;
                 s->pos += li;
                 break;
             }
@@ -1304,6 +1305,7 @@ const char *yam_status_str(yam_status s) {
         case YAM_ERR_SCAN:   return "scan error";
         case YAM_ERR_PARSE:  return "parse error";
         case YAM_ERR_EMIT:   return "emit error";
+        case YAM_ERR_LIMIT:  return "limit exceeded";
     }
     return "unknown";
 }

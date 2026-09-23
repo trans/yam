@@ -12,6 +12,7 @@
  */
 
 #include "yam/yam.h"
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -119,13 +120,15 @@ struct yam_parser {
     /* alias resolution (opt-in) */
     bool resolve_enabled;
 
-    /* safety limit */
+    /* safety limits */
     int max_events;
+    int max_depth;
 
     /* error context */
     char     error_msg[256];
     yam_mark error_mark;
-    bool     oom;
+    bool     oom;        /* stop parsing: allocation failure or limit_hit */
+    bool     limit_hit;  /* a safety limit (events, depth, aliases) was hit */
 
     /* incremental state machine */
     bool         incremental;   /* true = state machine, false = eager */
@@ -170,12 +173,25 @@ struct yam_parser {
  * caller's field writes are then copied out with wide loads. */
 #define evt_simple(t) ((yam_event){ .type = (t) })
 
+/* Record that a safety limit was exceeded. Sets oom so every loop stops;
+ * OOM_STATUS then reports YAM_ERR_LIMIT rather than YAM_ERR_MEMORY. */
+static void hit_limit(yam_parser *p, const char *msg) {
+    if (!p->limit_hit) {
+        snprintf(p->error_msg, sizeof(p->error_msg), "%s", msg);
+        p->error_mark = p->current.start;
+    }
+    p->limit_hit = true;
+    p->oom = true;
+}
+
+#define OOM_STATUS(p) ((p)->limit_hit ? YAM_ERR_LIMIT : YAM_ERR_MEMORY)
+
 static inline bool over_limit(yam_parser *p) {
     return p->max_events > 0 && p->evt_len >= p->max_events;
 }
 
 static inline bool enqueue(yam_parser *p, const yam_event *evt) {
-    if (over_limit(p)) { p->oom = true; return false; }
+    if (over_limit(p)) { hit_limit(p, "event limit exceeded"); return false; }
     if (p->evt_len >= p->evt_cap) {
         int new_cap = p->evt_cap * 2;
         if (new_cap < 64) new_cap = 64;
@@ -205,6 +221,10 @@ static inline bool dequeue(yam_parser *p, yam_event *evt) {
 }
 
 static inline bool push_ctx(yam_parser *p, ctx_type type, int indent) {
+    if (p->max_depth > 0 && p->ctx_len >= p->max_depth) {
+        hit_limit(p, "nesting depth limit exceeded");
+        return false;
+    }
     if (p->ctx_len >= p->ctx_cap) {
         int new_cap = p->ctx_cap * 2;
         ctx_entry *new_data = realloc(p->contexts, new_cap * sizeof(ctx_entry));
@@ -460,8 +480,8 @@ static yam_status parse_flow_sequence(yam_parser *p) {
     yam_status st;
 
     for (;;) {
-        if (p->oom) return YAM_ERR_MEMORY;
-        if (over_limit(p)) PARSE_ERROR(p, "event limit exceeded");
+        if (p->oom) return OOM_STATUS(p);
+        if (over_limit(p)) { hit_limit(p, "event limit exceeded"); return YAM_ERR_LIMIT; }
         st = peek_token(p);
         if (st != YAM_OK) return st;
 
@@ -547,7 +567,7 @@ static yam_status parse_flow_sequence(yam_parser *p) {
                 placeholder.flow = true;
                 placeholder.start = p->events[key_idx].start;
                 placeholder.end = p->events[key_idx].start;
-                if (!enqueue(p, &placeholder)) return YAM_ERR_MEMORY;
+                if (!enqueue(p, &placeholder)) return OOM_STATUS(p);
                 /* shift key events right to make room for mapping start */
                 memmove(&p->events[key_idx + 1],
                         &p->events[key_idx],
@@ -598,8 +618,8 @@ static yam_status parse_flow_mapping(yam_parser *p) {
     yam_status st;
 
     for (;;) {
-        if (p->oom) return YAM_ERR_MEMORY;
-        if (over_limit(p)) PARSE_ERROR(p, "event limit exceeded");
+        if (p->oom) return OOM_STATUS(p);
+        if (over_limit(p)) { hit_limit(p, "event limit exceeded"); return YAM_ERR_LIMIT; }
         st = peek_token(p);
         if (st != YAM_OK) return st;
 
@@ -671,7 +691,7 @@ static yam_status parse_flow_mapping(yam_parser *p) {
 /* ── Parse a node in flow context ────────────────────────── */
 
 static yam_status parse_flow_node(yam_parser *p) {
-    if (p->oom) return YAM_ERR_MEMORY;
+    if (p->oom) return OOM_STATUS(p);
     yam_status st = consume_props(p);
     if (st != YAM_OK) return st;
 
@@ -752,7 +772,7 @@ static yam_status parse_flow_node(yam_parser *p) {
 /* ── Parse block map value ───────────────────────────────── */
 
 static yam_status parse_block_map_value(yam_parser *p, int map_indent) {
-    if (p->oom) return YAM_ERR_MEMORY;
+    if (p->oom) return OOM_STATUS(p);
     yam_status st = peek_token(p);
     if (st != YAM_OK) return st;
 
@@ -801,8 +821,8 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
     yam_status st;
 
     for (;;) {
-        if (p->oom) return YAM_ERR_MEMORY;
-        if (over_limit(p)) PARSE_ERROR(p, "event limit exceeded");
+        if (p->oom) return OOM_STATUS(p);
+        if (over_limit(p)) { hit_limit(p, "event limit exceeded"); return YAM_ERR_LIMIT; }
         st = peek_token(p);
         if (st != YAM_OK) return st;
 
@@ -952,8 +972,8 @@ static yam_status parse_block_sequence(yam_parser *p, int seq_indent) {
     yam_status st;
 
     for (;;) {
-        if (p->oom) return YAM_ERR_MEMORY;
-        if (over_limit(p)) PARSE_ERROR(p, "event limit exceeded");
+        if (p->oom) return OOM_STATUS(p);
+        if (over_limit(p)) { hit_limit(p, "event limit exceeded"); return YAM_ERR_LIMIT; }
         st = peek_token(p);
         if (st != YAM_OK) return st;
 
@@ -989,7 +1009,7 @@ static yam_status parse_block_sequence(yam_parser *p, int seq_indent) {
 /* ── Parse block node (may be scalar, collection, alias, flow) ── */
 
 static yam_status parse_block_node(yam_parser *p) {
-    if (p->oom) return YAM_ERR_MEMORY;
+    if (p->oom) return OOM_STATUS(p);
     yam_status st = consume_props(p);
     if (st != YAM_OK) return st;
 
@@ -1265,7 +1285,7 @@ static yam_status parse_block_node(yam_parser *p) {
             yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
             map_evt.start = p->events[saved_evt_len].start;
             map_evt.end = p->events[saved_evt_len].start;
-            if (!enqueue(p, &map_evt)) return YAM_ERR_MEMORY;
+            if (!enqueue(p, &map_evt)) return OOM_STATUS(p);
             memmove(&p->events[saved_evt_len + 1],
                     &p->events[saved_evt_len],
                     (p->evt_len - saved_evt_len - 1) * sizeof(yam_event));
@@ -1316,7 +1336,7 @@ static yam_status parse_block_node(yam_parser *p) {
             yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
             map_evt.start = p->events[saved_evt_len].start;
             map_evt.end = p->events[saved_evt_len].start;
-            if (!enqueue(p, &map_evt)) return YAM_ERR_MEMORY;
+            if (!enqueue(p, &map_evt)) return OOM_STATUS(p);
             memmove(&p->events[saved_evt_len + 1],
                     &p->events[saved_evt_len],
                     (p->evt_len - saved_evt_len - 1) * sizeof(yam_event));
@@ -1568,7 +1588,7 @@ static yam_status parse_block_node(yam_parser *p) {
 /* ── Parse document ──────────────────────────────────────── */
 
 static yam_status parse_document(yam_parser *p) {
-    if (p->oom) return YAM_ERR_MEMORY;
+    if (p->oom) return OOM_STATUS(p);
     yam_status st = peek_token(p);
     if (st != YAM_OK) return st;
 
@@ -1674,6 +1694,10 @@ static yam_status parse_document(yam_parser *p) {
         return YAM_OK; /* handled by caller */
     }
 
+    if (tok_type(p) == YAM_TOK_FLOW_SEQ_END || tok_type(p) == YAM_TOK_FLOW_MAP_END ||
+        tok_type(p) == YAM_TOK_FLOW_ENTRY)
+        PARSE_ERROR(p, "unexpected flow indicator outside a flow collection");
+
     /* implicit document */
     if (!p->doc_open) {
         ensure_doc(p, false, p->current.start);
@@ -1705,7 +1729,6 @@ static yam_status parse_stream(yam_parser *p) {
     p->stream_started = true;
 
     /* parse documents */
-    int guard = 0;
     for (;;) {
         st = peek_token(p);
         if (st != YAM_OK) return st;
@@ -1733,19 +1756,17 @@ static yam_status parse_stream(yam_parser *p) {
             return YAM_OK;
         }
 
-        /* safety: save position to detect non-progress */
-        int prev_evts = p->evt_len;
+        /* safety: a document that consumed no input can never make
+         * progress (it would emit empty nodes forever) */
+        size_t prev_off = p->current.start.offset;
+        yam_token_type prev_type = tok_type(p);
 
         st = parse_document(p);
         if (st != YAM_OK) return st;
 
-        /* if no progress was made, consume the problematic token */
-        if (p->evt_len == prev_evts) {
-            consume_token(p);
-            if (++guard > 10000) PARSE_ERROR(p, "parser stuck, possible malformed input");
-        } else {
-            guard = 0;
-        }
+        if (p->have_token && p->current.start.offset == prev_off &&
+            tok_type(p) == prev_type)
+            PARSE_ERROR(p, "unexpected token");
     }
 }
 
@@ -1826,14 +1847,19 @@ typedef struct {
     yam_event *data;
     int        len;
     int        cap;
-    bool       oom;
+    int        limit;    /* max events, or 0 for none */
+    bool       oom;      /* stop: allocation failure or limit reached */
+    bool       limited;  /* the limit (not allocation) stopped it */
 } evt_buf;
 
-static void ebuf_init(evt_buf *b, int cap) {
-    b->data = malloc(cap * sizeof(yam_event));
+static void ebuf_init(evt_buf *b, int cap, int limit) {
+    if (cap < 64) cap = 64;
+    b->data = malloc((size_t)cap * sizeof(yam_event));
     b->len = 0;
     b->cap = cap;
+    b->limit = limit;
     b->oom = !b->data;
+    b->limited = false;
 }
 
 static void ebuf_free(evt_buf *b) {
@@ -1843,9 +1869,15 @@ static void ebuf_free(evt_buf *b) {
 
 static void ebuf_push(evt_buf *b, yam_event e) {
     if (b->oom) return;
+    if (b->limit > 0 && b->len >= b->limit) {
+        b->oom = true;
+        b->limited = true;
+        return;
+    }
     if (b->len >= b->cap) {
+        if (b->cap > INT_MAX / 2) { b->oom = true; return; }
         int nc = b->cap * 2;
-        yam_event *nd = realloc(b->data, nc * sizeof(yam_event));
+        yam_event *nd = realloc(b->data, (size_t)nc * sizeof(yam_event));
         if (!nd) { b->oom = true; return; }
         b->data = nd; b->cap = nc;
     }
@@ -1926,16 +1958,16 @@ static void merge_from_mapping(const yam_event *events, int evt_len,
         }
 
         if (!skip) {
-            /* copy key events, stripping anchors from top-level */
-            for (int j = key_start; j < key_end; j++) {
+            /* copy key events; copies carry no anchors (not new definitions) */
+            for (int j = key_start; j < key_end && !out->oom; j++) {
                 yam_event copy = events[j];
-                if (j == key_start) copy.anchor = YAM_STR_NULL;
+                copy.anchor = YAM_STR_NULL;
                 ebuf_push(out, copy);
             }
             /* copy value events */
-            for (int j = val_start; j < val_end; j++) {
+            for (int j = val_start; j < val_end && !out->oom; j++) {
                 yam_event copy = events[j];
-                if (j == val_start) copy.anchor = YAM_STR_NULL;
+                copy.anchor = YAM_STR_NULL;
                 ebuf_push(out, copy);
             }
         }
@@ -1975,19 +2007,36 @@ static void process_merge_value(const yam_event *events, int evt_len,
     /* other value types (scalar, mapping) — silently ignored */
 }
 
+/* Event budget for merge/alias expansion. Expansion can grow the stream
+ * exponentially ("billion laughs"), so it is bounded by max_events, or, if
+ * that is disabled, by a multiple of the unexpanded stream. */
+static int expansion_limit(const yam_parser *p, int unexpanded) {
+    if (p->max_events > 0) return p->max_events;
+    long long lim = (long long)unexpanded * 16 + 100000;
+    return lim > INT_MAX / 2 ? INT_MAX / 2 : (int)lim;
+}
+
+/* Status for an expansion buffer that stopped early. */
+static yam_status expansion_failed(yam_parser *p, const evt_buf *b) {
+    if (!b->limited) return YAM_ERR_MEMORY;
+    hit_limit(p, "alias/merge expansion exceeds the event limit");
+    return YAM_ERR_LIMIT;
+}
+
 static yam_status resolve_merges(yam_parser *p) {
     #define MAX_MERGE_PASSES 32
+    int limit = expansion_limit(p, p->evt_len);
 
     for (int pass = 0; pass < MAX_MERGE_PASSES; pass++) {
         merge_anchor_table anchors;
         atbl_build(&anchors, p->events, p->evt_len);
 
         evt_buf out;
-        ebuf_init(&out, p->evt_len * 2);
+        ebuf_init(&out, p->evt_len * 2, limit);
         bool changed = false;
 
         int i = 0;
-        while (i < p->evt_len) {
+        while (i < p->evt_len && !out.oom) {
             if (p->events[i].type != YAM_EVT_MAPPING_START) {
                 ebuf_push(&out, p->events[i]);
                 i++;
@@ -2090,8 +2139,9 @@ static yam_status resolve_merges(yam_parser *p) {
         atbl_free(&anchors);
 
         if (out.oom) {
+            yam_status st = expansion_failed(p, &out);
             ebuf_free(&out);
-            return YAM_ERR_MEMORY;
+            return st;
         }
 
         if (!changed) {
@@ -2175,14 +2225,15 @@ static yam_status resolve_aliases(yam_parser *p) {
     atbl_free(&anchors);
 
     /* expand non-cyclic aliases in passes */
+    int limit = expansion_limit(p, p->evt_len);
     for (int pass = 0; pass < 32; pass++) {
         atbl_build(&anchors, p->events, p->evt_len);
 
         evt_buf out;
-        ebuf_init(&out, p->evt_len * 2);
+        ebuf_init(&out, p->evt_len * 2, limit);
         bool changed = false;
 
-        for (int i = 0; i < p->evt_len; i++) {
+        for (int i = 0; i < p->evt_len && !out.oom; i++) {
             if (p->events[i].type != YAM_EVT_ALIAS) {
                 ebuf_push(&out, p->events[i]);
                 continue;
@@ -2195,9 +2246,13 @@ static yam_status resolve_aliases(yam_parser *p) {
             }
 
             changed = true;
-            for (int j = a->start; j < a->end; j++) {
+            /* copies carry no anchors: they are not new definitions, and
+             * keeping them would grow the anchor table every pass (and
+             * misalign it with the cyclic[] flags, which are indexed by
+             * the original table) */
+            for (int j = a->start; j < a->end && !out.oom; j++) {
                 yam_event copy = p->events[j];
-                if (j == a->start) copy.anchor = YAM_STR_NULL;
+                copy.anchor = YAM_STR_NULL;
                 ebuf_push(&out, copy);
             }
         }
@@ -2205,10 +2260,11 @@ static yam_status resolve_aliases(yam_parser *p) {
         atbl_free(&anchors);
 
         if (out.oom) {
+            yam_status st = expansion_failed(p, &out);
             ebuf_free(&out);
             free(color);
             free(cyclic);
-            return YAM_ERR_MEMORY;
+            return st;
         }
 
         if (!changed) {
@@ -2405,7 +2461,7 @@ static bool flow_is_block_key(yam_parser *p, size_t offset) {
 
 static inline void inc_emit(yam_parser *p, const yam_event *evt) {
     if (p->max_events > 0 && p->events_delivered + p->out_len >= p->max_events) {
-        p->oom = true;
+        hit_limit(p, "event limit exceeded");
         return;
     }
     if (p->out_len < 8)
@@ -2414,6 +2470,10 @@ static inline void inc_emit(yam_parser *p, const yam_event *evt) {
 
 static inline void inc_push_frame(yam_parser *p, ctx_type type, int indent,
                                    parser_state return_state) {
+    if (p->max_depth > 0 && p->frame_len >= p->max_depth) {
+        hit_limit(p, "nesting depth limit exceeded");
+        return;
+    }
     if (p->frame_len >= p->frame_cap) {
         int nc = p->frame_cap * 2;
         state_frame *nf = realloc(p->frames, nc * sizeof(state_frame));
@@ -2439,7 +2499,7 @@ static inline state_frame *inc_top_frame(yam_parser *p) {
  * it in a local and copying it over stalls on store forwarding. */
 static inline void inc_emit_scalar_token(yam_parser *p) {
     if (p->max_events > 0 && p->events_delivered + p->out_len >= p->max_events) {
-        p->oom = true;
+        hit_limit(p, "event limit exceeded");
         return;
     }
     if (p->out_len < 8) {
@@ -2580,7 +2640,7 @@ static yam_status parser_step_flow(yam_parser *p) {
     /* ── Flow mapping states (incremental) ─────────────────── */
 
     case ST_FLOW_MAP_LOOP: {
-        if (p->oom) return YAM_ERR_MEMORY;
+        if (p->oom) return OOM_STATUS(p);
         peek_token(p);
         tt = tok_type(p);
 
@@ -2680,7 +2740,7 @@ static yam_status parser_step_flow(yam_parser *p) {
     /* ── Flow sequence states (incremental) ────────────────── */
 
     case ST_FLOW_SEQ_LOOP: {
-        if (p->oom) return YAM_ERR_MEMORY;
+        if (p->oom) return OOM_STATUS(p);
         peek_token(p);
         tt = tok_type(p);
 
@@ -2980,7 +3040,7 @@ static yam_status parser_step(yam_parser *p) {
     yam_event evt;
     state_frame *top;
 
-    if (p->oom) return YAM_ERR_MEMORY;
+    if (p->oom) return OOM_STATUS(p);
 
     switch (p->state) {
 
@@ -3196,6 +3256,10 @@ static yam_status parser_step(yam_parser *p) {
             p->state = ST_BLOCK_NODE_SCALAR;
             return YAM_OK;
         }
+
+        if (tt == YAM_TOK_FLOW_SEQ_END || tt == YAM_TOK_FLOW_MAP_END ||
+            tt == YAM_TOK_FLOW_ENTRY)
+            PARSE_ERROR(p, "unexpected flow indicator outside a flow collection");
 
         /* DOC_START, DOC_END, STREAM_END → empty node */
         p->state = ST_BLOCK_NODE_EMPTY;
@@ -3736,6 +3800,9 @@ static yam_status parser_step(yam_parser *p) {
     case ST_DOC_END_EXPLICIT: {
         peek_token(p);
         tt = tok_type(p);
+        if (tt != YAM_TOK_DOC_END && tt != YAM_TOK_DOC_START &&
+            tt != YAM_TOK_STREAM_END)
+            PARSE_ERROR(p, "unexpected content after document root node");
         if (tt == YAM_TOK_DOC_END) {
             consume_token(p);
             evt = evt_simple(YAM_EVT_DOC_END);
@@ -3813,7 +3880,8 @@ yam_parser *yam_parser_new(const char *input, size_t len, yam_arena *a) {
     p->doc_open = false;
     p->merge_enabled = false;
     p->resolve_enabled = false;
-    p->max_events = 10000; /* safety limit */
+    p->max_events = 10000; /* safety limits */
+    p->max_depth = 256;
     p->oom = false;
 
     /* incremental state machine — use eager mode when merge/alias needed */
@@ -3901,7 +3969,7 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
         if (st != YAM_OK) return st;
         if (p->oom) {
             if (p->out_len > 0) break; /* drain valid events first */
-            return YAM_ERR_MEMORY;
+            return OOM_STATUS(p);
         }
 
         if (p->state == ST_EAGER_DRAIN) {
@@ -3921,6 +3989,7 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
             p->pending_anchor = YAM_STR_NULL;
             p->pending_tag = YAM_STR_NULL;
             p->oom = false;
+            p->limit_hit = false;
             p->events_delivered = 0;
             /* reset scanner to beginning */
             yam_scanner_free(p->scanner);
@@ -3971,6 +4040,10 @@ void yam_parser_set_resolve(yam_parser *p, bool enable) {
 
 void yam_parser_set_max_events(yam_parser *p, int max) {
     if (p) p->max_events = max;
+}
+
+void yam_parser_set_max_depth(yam_parser *p, int max) {
+    if (p) p->max_depth = max;
 }
 
 const char *yam_parser_error(yam_parser *p) {
