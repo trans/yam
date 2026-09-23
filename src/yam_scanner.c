@@ -1071,6 +1071,10 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
                 if (min_indent < 0) min_indent = 0;
                 if (li >= min_indent) {
                     base_indent = li;
+                    /* leading empty lines may not be indented more than
+                     * the first content line (YAML 1.2 §8.1.1.1) */
+                    if (max_empty_indent > li)
+                        SCAN_ERROR(s, "leading empty line in block scalar has more spaces than the first content line");
                 }
                 break;
             }
