@@ -106,6 +106,12 @@ static void advance(yam_scanner *s, size_t n) {
     }
 }
 
+/* Advance over `n` bytes known to contain no line break. */
+static inline void advance_cols(yam_scanner *s, size_t n) {
+    s->pos += n;
+    s->col += n;
+}
+
 static void skip_break(yam_scanner *s) {
     if (s->pos >= s->len) return;
     if (s->buf[s->pos] == '\r') {
@@ -122,12 +128,12 @@ static void skip_blanks_and_comments(yam_scanner *s) {
     for (;;) {
         /* skip spaces and tabs */
         size_t skip = yam_skip_blanks(BUF_AT(s), REMAINING(s));
-        advance(s, skip);
+        advance_cols(s, skip);
 
         /* comment? skip to end of line */
         if (PEEK(s) == '#') {
             size_t to_break = yam_scan_to_break(BUF_AT(s), REMAINING(s));
-            advance(s, to_break);
+            advance_cols(s, to_break);
         }
 
         /* line break? */
@@ -452,6 +458,26 @@ static yam_status scan_single_quoted(yam_scanner *s, yam_token *tok) {
     yam_mark start = mark(s);
     advance(s, 1); /* skip opening ' */
 
+    /* fast path: no '' escapes or line breaks → zero-copy slice of the input */
+    {
+        size_t j = s->pos;
+        while (j < s->len) {
+            char c = s->buf[j];
+            if (c == '\'' || c == '\n' || c == '\r') break;
+            j++;
+        }
+        if (j < s->len && s->buf[j] == '\'' &&
+            !(j + 1 < s->len && s->buf[j + 1] == '\'')) {
+            yam_str val = {s->buf + s->pos, j - s->pos};
+            s->col += j + 1 - s->pos;
+            s->pos = j + 1;
+            s->last_token_col = (int)start.col - 1;
+            s->last_was_quoted = true;
+            *tok = tok_scalar(val, YAM_SCALAR_SINGLE_QUOTED, start, mark(s));
+            return YAM_OK;
+        }
+    }
+
     /* Allocate buffer for the result (handles escapes and line folding) */
     size_t buf_cap = 64;
     char *buf = yam_arena_alloc(s->arena, buf_cap, 1);
@@ -521,6 +547,25 @@ static yam_status scan_single_quoted(yam_scanner *s, yam_token *tok) {
 static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
     yam_mark start = mark(s);
     advance(s, 1); /* skip opening " */
+
+    /* fast path: no escapes or line breaks → zero-copy slice of the input */
+    {
+        size_t j = s->pos;
+        while (j < s->len) {
+            char c = s->buf[j];
+            if (c == '"' || c == '\\' || c == '\n' || c == '\r') break;
+            j++;
+        }
+        if (j < s->len && s->buf[j] == '"') {
+            yam_str val = {s->buf + s->pos, j - s->pos};
+            s->col += j + 1 - s->pos;
+            s->pos = j + 1;
+            s->last_token_col = (int)start.col - 1;
+            s->last_was_quoted = true;
+            *tok = tok_scalar(val, YAM_SCALAR_DOUBLE_QUOTED, start, mark(s));
+            return YAM_OK;
+        }
+    }
 
     /* double-quoted always needs processing for escape sequences */
     /* pre-scan for length */

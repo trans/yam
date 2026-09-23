@@ -143,6 +143,15 @@ struct yam_parser {
     parser_state node_return;  /* where to go after a block node completes */
     int          events_delivered; /* events returned to caller (for eager fallback skip) */
     yam_status   scan_error;      /* last scanner error (for incremental path) */
+    int          scan_error_out;  /* out_len when scan_error was hit */
+
+    /* flow-as-key lookahead cache (see flow_is_block_key) */
+    bool    fk_valid;
+    size_t  fk_lo, fk_hi;   /* byte range of the last scanned collection */
+    size_t *fk_keys;        /* sorted open offsets of collections that are keys */
+    int     fk_nkeys, fk_keys_cap;
+    size_t *fk_stack;       /* scan scratch: open-bracket offsets */
+    int     fk_stack_cap;
 };
 
 /* ── Error reporting ─────────────────────────────────────── */
@@ -155,12 +164,11 @@ struct yam_parser {
 
 /* ── Helpers ─────────────────────────────────────────────── */
 
-static inline yam_event evt_simple(yam_event_type type) {
-    yam_event e;
-    memset(&e, 0, sizeof(e));
-    e.type = type;
-    return e;
-}
+/* Zeroed event of the given type. A compound literal rather than a
+ * function: events are ~112 bytes, and GCC does not reliably inline a
+ * by-value helper, which costs a call plus store-forwarding stalls when the
+ * caller's field writes are then copied out with wide loads. */
+#define evt_simple(t) ((yam_event){ .type = (t) })
 
 static inline bool over_limit(yam_parser *p) {
     return p->max_events > 0 && p->evt_len >= p->max_events;
@@ -228,6 +236,7 @@ static inline yam_status peek_token(yam_parser *p) {
             p->error_mark = yam_scanner_error_mark(p->scanner);
         }
         p->scan_error = st; /* save for incremental path error detection */
+        p->scan_error_out = p->out_len;
         return st;
     }
     p->have_token = true;
@@ -2221,57 +2230,186 @@ static yam_status resolve_aliases(yam_parser *p) {
 
 /* ── Flow-as-key lookahead ──────────────────────────────── */
 
-/* Scan raw bytes from offset to find the matching ] or } at depth 0,
- * then check if ':' follows (skipping whitespace and comments).
- * Returns true if the flow collection is a complex block key. */
-static bool flow_is_block_key(const char *input, size_t len, size_t offset) {
-    int depth = 0;
-    bool in_sq = false, in_dq = false;
-    for (size_t i = offset; i < len; i++) {
-        char c = input[i];
-        if (in_sq) {
-            if (c == '\'' && i + 1 < len && input[i + 1] == '\'') i++;
-            else if (c == '\'') in_sq = false;
+/* Before parsing a flow collection incrementally we must know whether it is
+ * an implicit key ([a]: b), because MAPPING_START has to be emitted first.
+ * We answer by scanning raw bytes to the matching ] or } and checking for a
+ * following ':' (skipping whitespace and comments).
+ *
+ * One scan answers the question for every collection nested inside the
+ * scanned one, so results are cached: later queries for nested collections
+ * are a binary search instead of a rescan. This keeps the lookahead linear
+ * overall (rescanning per collection is quadratic in nesting depth), and for
+ * a typical document the whole top-level collection is scanned exactly once.
+ *
+ * Quote and comment detection follows YAML token rules rather than treating
+ * every ' " # byte as special: a quote only opens a quoted scalar at the
+ * start of a token, and '#' only starts a comment after whitespace. So
+ * plain scalars such as don't or a#b do not derail the scan. */
+
+/* Can a token start at input[i], judging by the byte before it? */
+static inline bool fk_token_boundary(const char *input, size_t i) {
+    if (i == 0) return true;
+    char c = input[i - 1];
+    switch (c) {
+    case ' ': case '\t': case '\n': case '\r':
+    case '[': case '{': case ',': case ']': case '}':
+        return true;
+    case ':':
+        /* adjacent value after a JSON-like key: {"a":'b'} */
+        if (i < 2) return false;
+        c = input[i - 2];
+        return c == '"' || c == '\'' || c == ']' || c == '}';
+    default:
+        return false;
+    }
+}
+
+/* Offset just past a quoted scalar whose opening quote is at `i`, or `len`
+ * if it is unterminated. */
+static size_t fk_skip_quoted(const char *input, size_t len, size_t i) {
+    char q = input[i];
+    size_t j = i + 1;
+    for (;;) {
+        const char *hit = memchr(input + j, q, len - j);
+        if (!hit) return len;
+        size_t k = (size_t)(hit - input);
+        if (q == '\'') {
+            if (k + 1 < len && input[k + 1] == '\'') { j = k + 2; continue; }
+            return k + 1;
+        }
+        /* double-quoted: escaped if preceded by an odd run of backslashes */
+        size_t bs = 0;
+        while (k - bs > i + 1 && input[k - bs - 1] == '\\') bs++;
+        if (bs & 1) { j = k + 1; continue; }
+        return k + 1;
+    }
+}
+
+/* Is the byte after a closing bracket at `i` (skipping blanks, breaks and
+ * comments) a ':'? */
+static bool fk_colon_follows(const char *input, size_t len, size_t i) {
+    for (size_t j = i + 1; j < len; j++) {
+        char nc = input[j];
+        if (nc == ' ' || nc == '\t' || nc == '\n' || nc == '\r') continue;
+        if (nc == '#') {
+            const char *nl = memchr(input + j, '\n', len - j);
+            if (!nl) return false;
+            j = (size_t)(nl - input);
             continue;
         }
-        if (in_dq) {
-            if (c == '\\') { i++; continue; }
-            if (c == '"') in_dq = false;
-            continue;
-        }
-        if (c == '#') { while (i < len && input[i] != '\n') i++; continue; }
-        if (c == '\'') { in_sq = true; continue; }
-        if (c == '"') { in_dq = true; continue; }
-        if (c == '[' || c == '{') depth++;
-        else if (c == ']' || c == '}') {
-            depth--;
-            if (depth == 0) {
-                for (size_t j = i + 1; j < len; j++) {
-                    char nc = input[j];
-                    if (nc == ' ' || nc == '\t') continue;
-                    if (nc == '\n' || nc == '\r') continue;
-                    if (nc == '#') {
-                        while (j < len && input[j] != '\n') j++;
-                        continue;
-                    }
-                    return nc == ':';
-                }
-                return false;
-            }
-        }
+        return nc == ':';
     }
     return false;
 }
 
+/* Bytes the lookahead scan has to look at; everything else is skipped. */
+static const bool fk_special[256] = {
+    ['\''] = true, ['"'] = true, ['#'] = true,
+    ['['] = true, [']'] = true, ['{'] = true, ['}'] = true,
+};
+
+static int fk_cmp(const void *a, const void *b) {
+    size_t x = *(const size_t *)a, y = *(const size_t *)b;
+    return (x > y) - (x < y);
+}
+
+/* Scan the collection opening at `offset`, filling the cache with the open
+ * offsets of every collection within it (itself included) that is a key.
+ * Returns false on allocation failure. */
+static bool fk_scan(yam_parser *p, size_t offset) {
+    const char *input = p->input;
+    size_t len = p->input_len;
+    int depth = 0;
+
+    p->fk_valid = false;
+    p->fk_nkeys = 0;
+
+    for (size_t i = offset; i < len; i++) {
+        while (!fk_special[(uint8_t)input[i]]) {
+            if (++i == len) goto unterminated;
+        }
+        char c = input[i];
+        switch (c) {
+        case '\'': case '"':
+            if (fk_token_boundary(input, i)) i = fk_skip_quoted(input, len, i) - 1;
+            break;
+        case '#':
+            if (i > 0 && (input[i - 1] == ' ' || input[i - 1] == '\t' ||
+                          input[i - 1] == '\n' || input[i - 1] == '\r')) {
+                const char *nl = memchr(input + i, '\n', len - i);
+                i = nl ? (size_t)(nl - input) : len;
+            }
+            break;
+        case '[': case '{':
+            if (depth >= p->fk_stack_cap) {
+                int nc = p->fk_stack_cap ? p->fk_stack_cap * 2 : 64;
+                size_t *ns = realloc(p->fk_stack, (size_t)nc * sizeof(size_t));
+                if (!ns) return false;
+                p->fk_stack = ns;
+                p->fk_stack_cap = nc;
+            }
+            p->fk_stack[depth++] = i;
+            break;
+        case ']': case '}':
+            if (depth == 0) break;
+            depth--;
+            if (fk_colon_follows(input, len, i)) {
+                if (p->fk_nkeys >= p->fk_keys_cap) {
+                    int nc = p->fk_keys_cap ? p->fk_keys_cap * 2 : 16;
+                    size_t *nk = realloc(p->fk_keys, (size_t)nc * sizeof(size_t));
+                    if (!nk) return false;
+                    p->fk_keys = nk;
+                    p->fk_keys_cap = nc;
+                }
+                p->fk_keys[p->fk_nkeys++] = p->fk_stack[depth];
+            }
+            if (depth == 0) {
+                p->fk_lo = offset;
+                p->fk_hi = i;
+                goto done;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+unterminated:
+    /* unclosed collections are never keys */
+    p->fk_lo = offset;
+    p->fk_hi = len;
+done:
+    if (p->fk_nkeys > 1)
+        qsort(p->fk_keys, (size_t)p->fk_nkeys, sizeof(size_t), fk_cmp);
+    p->fk_valid = true;
+    return true;
+}
+
+/* Returns true if the flow collection opening at `offset` is an implicit
+ * key, i.e. ':' follows its matching close bracket. */
+static bool flow_is_block_key(yam_parser *p, size_t offset) {
+    if (!p->fk_valid || offset < p->fk_lo || offset > p->fk_hi) {
+        /* on allocation failure, claim "key": the eager fallback is always
+         * correct, just slower */
+        if (!fk_scan(p, offset)) return true;
+    }
+    size_t lo = 0, hi = (size_t)p->fk_nkeys;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (p->fk_keys[mid] < offset) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < (size_t)p->fk_nkeys && p->fk_keys[lo] == offset;
+}
+
 /* ── Incremental state machine ───────────────────────────── */
 
-static inline void inc_emit(yam_parser *p, yam_event evt) {
+static inline void inc_emit(yam_parser *p, const yam_event *evt) {
     if (p->max_events > 0 && p->events_delivered + p->out_len >= p->max_events) {
         p->oom = true;
         return;
     }
     if (p->out_len < 8)
-        p->out_buf[p->out_len++] = evt;
+        p->out_buf[p->out_len++] = *evt;
 }
 
 static inline void inc_push_frame(yam_parser *p, ctx_type type, int indent,
@@ -2296,6 +2434,545 @@ static inline state_frame *inc_top_frame(yam_parser *p) {
     return NULL;
 }
 
+/* Emit a scalar event for the current (SCALAR) token, with pending props,
+ * and consume the token. The event is built in place in out_buf: building
+ * it in a local and copying it over stalls on store forwarding. */
+static inline void inc_emit_scalar_token(yam_parser *p) {
+    if (p->max_events > 0 && p->events_delivered + p->out_len >= p->max_events) {
+        p->oom = true;
+        return;
+    }
+    if (p->out_len < 8) {
+        yam_event *e = &p->out_buf[p->out_len++];
+        *e = (yam_event){
+            .type = YAM_EVT_SCALAR,
+            .value = p->current.value,
+            .scalar_style = p->current.scalar_style,
+            .start = p->current.start,
+            .end = p->current.end,
+        };
+        attach_props(p, e);
+    }
+    consume_token(p);
+}
+
+/* After a flow collection entry: consume ',' or go straight to the close
+ * state, skipping a round trip through the SEP/LOOP states. Anything else
+ * is left to the SEP state, which reports the error. */
+static inline yam_status inc_flow_sep(yam_parser *p, bool in_seq) {
+    yam_status st = peek_token(p);
+    if (st != YAM_OK) return st;
+    yam_token_type tt = tok_type(p);
+    if (tt == YAM_TOK_FLOW_ENTRY) {
+        consume_token(p);
+        p->state = in_seq ? ST_FLOW_SEQ_LOOP : ST_FLOW_MAP_LOOP;
+    } else if (tt == (in_seq ? YAM_TOK_FLOW_SEQ_END : YAM_TOK_FLOW_MAP_END)) {
+        p->state = in_seq ? ST_FLOW_SEQ_END : ST_FLOW_MAP_END;
+    } else {
+        p->state = in_seq ? ST_FLOW_SEQ_SEP : ST_FLOW_MAP_SEP;
+    }
+    return YAM_OK;
+}
+
+/* Flow mapping value, with the ':' already consumed. */
+static inline yam_status inc_flow_map_value(yam_parser *p) {
+    yam_status st = peek_token(p);
+    if (st != YAM_OK) return st;
+    yam_token_type tt = tok_type(p);
+    if (tt == YAM_TOK_SCALAR) {
+        /* common case: scalar value, emitted in the same step */
+        inc_emit_scalar_token(p);
+        return inc_flow_sep(p, false);
+    }
+    if (tt == YAM_TOK_FLOW_ENTRY || tt == YAM_TOK_FLOW_MAP_END) {
+        /* empty value */
+        yam_event evt = evt_simple(YAM_EVT_SCALAR);
+        evt.start = p->current.start;
+        evt.end = p->current.start;
+        inc_emit(p, &evt);
+        p->state = ST_FLOW_MAP_SEP;
+    } else {
+        p->node_return = ST_FLOW_MAP_SEP;
+        p->state = ST_FLOW_NODE;
+    }
+    return YAM_OK;
+}
+
+/* Flow-context states. Kept out of parser_step so the block-context
+ * dispatch stays compact; parser_step forwards every ST_FLOW_* state here. */
+static yam_status parser_step_flow(yam_parser *p) {
+    yam_token_type tt;
+    int col;
+    yam_event evt;
+
+    switch (p->state) {
+
+    /* ── Flow node dispatch (incremental) ──────────────────── */
+
+    case ST_FLOW_NODE: {
+        peek_token(p);
+        tt = tok_type(p);
+
+        /* consume properties if present */
+        if (tt == YAM_TOK_TAG || tt == YAM_TOK_ANCHOR) {
+            yam_status st = consume_props(p);
+            if (st != YAM_OK) return st;
+            peek_token(p);
+            tt = tok_type(p);
+        }
+
+        if (tt == YAM_TOK_SCALAR) {
+            inc_emit_scalar_token(p);
+            p->state = p->node_return;
+            return YAM_OK;
+        }
+
+        if (tt == YAM_TOK_ALIAS) {
+            evt = evt_simple(YAM_EVT_ALIAS);
+            evt.value = p->current.value;
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+            attach_props(p, &evt);
+            consume_token(p);
+            inc_emit(p, &evt);
+            p->state = p->node_return;
+            return YAM_OK;
+        }
+
+        if (tt == YAM_TOK_FLOW_SEQ_START) {
+            col = tok_col(p);
+            evt = evt_simple(YAM_EVT_SEQUENCE_START);
+            evt.flow = true;
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+            attach_props(p, &evt);
+            consume_token(p);
+            inc_emit(p, &evt);
+            inc_push_frame(p, CTX_FLOW_SEQ, col, p->node_return);
+            p->state = ST_FLOW_SEQ_LOOP;
+            return YAM_OK;
+        }
+
+        if (tt == YAM_TOK_FLOW_MAP_START) {
+            col = tok_col(p);
+            evt = evt_simple(YAM_EVT_MAPPING_START);
+            evt.flow = true;
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+            attach_props(p, &evt);
+            consume_token(p);
+            inc_emit(p, &evt);
+            inc_push_frame(p, CTX_FLOW_MAP, col, p->node_return);
+            p->state = ST_FLOW_MAP_LOOP;
+            return YAM_OK;
+        }
+
+        /* empty node */
+        evt = evt_simple(YAM_EVT_SCALAR);
+        evt.start = p->current.start;
+        evt.end = p->current.start;
+        attach_props(p, &evt);
+        inc_emit(p, &evt);
+        p->state = p->node_return;
+        return YAM_OK;
+    }
+
+    /* ── Flow mapping states (incremental) ─────────────────── */
+
+    case ST_FLOW_MAP_LOOP: {
+        if (p->oom) return YAM_ERR_MEMORY;
+        peek_token(p);
+        tt = tok_type(p);
+
+        if (tt == YAM_TOK_FLOW_MAP_END) {
+            p->state = ST_FLOW_MAP_END;
+            return YAM_OK;
+        }
+
+        /* explicit key: ? */
+        if (tt == YAM_TOK_BLOCK_MAP_KEY) {
+            consume_token(p);
+            peek_token(p);
+            tt = tok_type(p);
+            if (tt == YAM_TOK_BLOCK_MAP_VALUE ||
+                tt == YAM_TOK_FLOW_ENTRY ||
+                tt == YAM_TOK_FLOW_MAP_END) {
+                /* empty key */
+                evt = evt_simple(YAM_EVT_SCALAR);
+                evt.start = p->current.start;
+                evt.end = p->current.start;
+                inc_emit(p, &evt);
+                p->state = ST_FLOW_MAP_VALUE;
+            } else {
+                p->node_return = ST_FLOW_MAP_VALUE;
+                p->state = ST_FLOW_NODE;
+            }
+            return YAM_OK;
+        }
+
+        /* common case: scalar key — emit it, and the value too when it is
+         * a scalar, in a single step */
+        if (tt == YAM_TOK_SCALAR) {
+            inc_emit_scalar_token(p);
+            p->state = ST_FLOW_MAP_VALUE;
+            yam_status st = peek_token(p);
+            if (st != YAM_OK) return st;
+            if (tok_type(p) != YAM_TOK_BLOCK_MAP_VALUE) return YAM_OK;
+            consume_token(p);
+            return inc_flow_map_value(p);
+        }
+
+        /* implicit key: dispatch to flow node, then check for : */
+        p->node_return = ST_FLOW_MAP_VALUE;
+        p->state = ST_FLOW_NODE;
+        return YAM_OK;
+    }
+
+    case ST_FLOW_MAP_VALUE: {
+        peek_token(p);
+        tt = tok_type(p);
+
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE) {
+            consume_token(p);
+            return inc_flow_map_value(p);
+        } else {
+            /* no ':', emit empty value */
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, &evt);
+            p->state = ST_FLOW_MAP_SEP;
+        }
+        return YAM_OK;
+    }
+
+    case ST_FLOW_MAP_SEP: {
+        peek_token(p);
+        tt = tok_type(p);
+
+        if (tt == YAM_TOK_FLOW_ENTRY) {
+            consume_token(p);
+            p->state = ST_FLOW_MAP_LOOP;
+            return YAM_OK;
+        }
+        if (tt == YAM_TOK_FLOW_MAP_END) {
+            p->state = ST_FLOW_MAP_LOOP; /* will close next iteration */
+            return YAM_OK;
+        }
+        PARSE_ERROR(p, "expected ',' or '}' in flow mapping");
+    }
+
+    case ST_FLOW_MAP_END: {
+        yam_mark close = p->current.start;
+        yam_mark close_end = p->current.end;
+        consume_token(p); /* consume } */
+        evt = evt_simple(YAM_EVT_MAPPING_END);
+        evt.start = close;
+        evt.end = close_end;
+        inc_emit(p, &evt);
+        state_frame frame = inc_pop_frame(p);
+        p->state = frame.return_state;
+        if (p->state == ST_FLOW_SEQ_SEP) return inc_flow_sep(p, true);
+        if (p->state == ST_FLOW_MAP_SEP) return inc_flow_sep(p, false);
+        return YAM_OK;
+    }
+
+    /* ── Flow sequence states (incremental) ────────────────── */
+
+    case ST_FLOW_SEQ_LOOP: {
+        if (p->oom) return YAM_ERR_MEMORY;
+        peek_token(p);
+        tt = tok_type(p);
+
+        if (tt == YAM_TOK_FLOW_SEQ_END) {
+            p->state = ST_FLOW_SEQ_END;
+            return YAM_OK;
+        }
+
+        /* explicit pair: ? key : value */
+        if (tt == YAM_TOK_BLOCK_MAP_KEY) {
+            p->state = ST_FLOW_SEQ_EXPLICIT_KEY;
+            return YAM_OK;
+        }
+
+        /* scalar or alias: potential implicit pair key */
+        if (tt == YAM_TOK_SCALAR || tt == YAM_TOK_ALIAS) {
+            p->state = ST_FLOW_SEQ_ENTRY;
+            goto flow_seq_entry;
+        }
+
+        /* nested flow collection as entry — could be implicit pair key
+         * ([{a}: val]) which we can't handle incrementally.  Scan ahead
+         * to the matching close bracket: if ':' follows it's a pair key
+         * and we fall back to eager; otherwise parse incrementally. */
+        if (tt == YAM_TOK_FLOW_SEQ_START || tt == YAM_TOK_FLOW_MAP_START) {
+            if (flow_is_block_key(p, p->current.start.offset)) {
+                p->state = ST_EAGER_DRAIN;
+            } else {
+                p->node_return = ST_FLOW_SEQ_SEP;
+                p->state = ST_FLOW_NODE;
+            }
+            return YAM_OK;
+        }
+
+        /* implicit pair with empty key: [ : value ] */
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE) {
+            evt = evt_simple(YAM_EVT_MAPPING_START);
+            evt.flow = true;
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, &evt);
+
+            /* emit empty key */
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, &evt);
+
+            consume_token(p); /* consume : */
+
+            /* parse value */
+            peek_token(p);
+            tt = tok_type(p);
+            if (tt == YAM_TOK_FLOW_ENTRY ||
+                tt == YAM_TOK_FLOW_SEQ_END) {
+                evt = evt_simple(YAM_EVT_SCALAR);
+                evt.start = p->current.start;
+                evt.end = p->current.start;
+                inc_emit(p, &evt);
+                p->state = ST_FLOW_SEQ_IMPLICIT_END;
+            } else {
+                p->node_return = ST_FLOW_SEQ_IMPLICIT_END;
+                p->state = ST_FLOW_NODE;
+            }
+            return YAM_OK;
+        }
+
+        /* TAG/ANCHOR: consume props, re-enter loop */
+        if (tt == YAM_TOK_TAG || tt == YAM_TOK_ANCHOR) {
+            yam_status st = consume_props(p);
+            if (st != YAM_OK) return st;
+            st = peek_token(p);
+            if (st != YAM_OK) return st;
+            tt = tok_type(p);
+            if (tt == YAM_TOK_FLOW_ENTRY || tt == YAM_TOK_FLOW_SEQ_END) {
+                /* properties on an empty node: [&a, b] */
+                evt = evt_simple(YAM_EVT_SCALAR);
+                evt.start = p->current.start;
+                evt.end = p->current.start;
+                attach_props(p, &evt);
+                inc_emit(p, &evt);
+                return inc_flow_sep(p, true);
+            }
+            /* a second anchor or tag that consume_props refused would
+             * otherwise be re-dispatched here forever */
+            if (tt == YAM_TOK_TAG || tt == YAM_TOK_ANCHOR)
+                PARSE_ERROR(p, "expected ',' or ']' in flow sequence");
+            /* props consumed, stay in ST_FLOW_SEQ_LOOP to re-dispatch */
+            return YAM_OK;
+        }
+
+        /* comma: empty entry */
+        if (tt == YAM_TOK_FLOW_ENTRY) {
+            consume_token(p);
+            /* stay in LOOP — next iteration handles the entry */
+            return YAM_OK;
+        }
+
+        PARSE_ERROR(p, "unexpected token in flow sequence");
+    }
+
+    case ST_FLOW_SEQ_ENTRY:
+    flow_seq_entry: {
+        /* Parse scalar/alias, peek for ':' to detect implicit pair */
+        peek_token(p);
+        tt = tok_type(p);
+
+        if (tt == YAM_TOK_SCALAR) {
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.value = p->current.value;
+            evt.scalar_style = p->current.scalar_style;
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+        } else { /* ALIAS */
+            evt = evt_simple(YAM_EVT_ALIAS);
+            evt.value = p->current.value;
+            evt.start = p->current.start;
+            evt.end = p->current.end;
+        }
+        attach_props(p, &evt);
+        consume_token(p);
+
+        /* peek for ':' — implicit pair detection */
+        peek_token(p);
+        if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
+            p->saved_node = evt;
+            p->have_saved_node = true;
+            p->state = ST_FLOW_SEQ_ENTRY_KEY;
+            return YAM_OK;
+        }
+
+        /* plain entry, not a pair */
+        inc_emit(p, &evt);
+        return inc_flow_sep(p, true);
+    }
+
+    case ST_FLOW_SEQ_ENTRY_KEY: {
+        /* Implicit pair detected: emit MAPPING_START + saved key */
+        evt = evt_simple(YAM_EVT_MAPPING_START);
+        evt.flow = true;
+        evt.start = p->saved_node.start;
+        evt.end = p->saved_node.start;
+        inc_emit(p, &evt);
+        inc_emit(p, &p->saved_node);
+        p->have_saved_node = false;
+
+        /* consume ':' */
+        consume_token(p);
+
+        /* check for empty value */
+        peek_token(p);
+        tt = tok_type(p);
+        if (tt == YAM_TOK_FLOW_ENTRY || tt == YAM_TOK_FLOW_SEQ_END) {
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, &evt);
+            p->state = ST_FLOW_SEQ_IMPLICIT_END;
+        } else {
+            p->node_return = ST_FLOW_SEQ_IMPLICIT_END;
+            p->state = ST_FLOW_NODE;
+        }
+        return YAM_OK;
+    }
+
+    case ST_FLOW_SEQ_IMPLICIT_END: {
+        evt = evt_simple(YAM_EVT_MAPPING_END);
+        peek_token(p);
+        evt.start = p->current.start;
+        evt.end = p->current.start;
+        inc_emit(p, &evt);
+        p->state = ST_FLOW_SEQ_SEP;
+        return YAM_OK;
+    }
+
+    case ST_FLOW_SEQ_EXPLICIT_KEY: {
+        /* ? key : value pair in flow sequence */
+        evt = evt_simple(YAM_EVT_MAPPING_START);
+        evt.flow = true;
+        evt.start = p->current.start;
+        evt.end = p->current.end;
+        inc_emit(p, &evt);
+
+        consume_token(p); /* consume ? */
+
+        peek_token(p);
+        tt = tok_type(p);
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE ||
+            tt == YAM_TOK_FLOW_ENTRY ||
+            tt == YAM_TOK_FLOW_SEQ_END) {
+            /* empty key */
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, &evt);
+            p->state = ST_FLOW_SEQ_EXPLICIT_VALUE;
+        } else {
+            p->node_return = ST_FLOW_SEQ_EXPLICIT_VALUE;
+            p->state = ST_FLOW_NODE;
+        }
+        return YAM_OK;
+    }
+
+    case ST_FLOW_SEQ_EXPLICIT_VALUE: {
+        peek_token(p);
+        tt = tok_type(p);
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE) {
+            consume_token(p);
+            peek_token(p);
+            tt = tok_type(p);
+            if (tt == YAM_TOK_FLOW_ENTRY ||
+                tt == YAM_TOK_FLOW_SEQ_END) {
+                evt = evt_simple(YAM_EVT_SCALAR);
+                evt.start = p->current.start;
+                evt.end = p->current.start;
+                inc_emit(p, &evt);
+            } else {
+                p->node_return = ST_FLOW_SEQ_EXPLICIT_END;
+                p->state = ST_FLOW_NODE;
+                return YAM_OK;
+            }
+        } else {
+            /* no value indicator, emit empty */
+            evt = evt_simple(YAM_EVT_SCALAR);
+            evt.start = p->current.start;
+            evt.end = p->current.start;
+            inc_emit(p, &evt);
+        }
+        p->state = ST_FLOW_SEQ_EXPLICIT_END;
+        return YAM_OK;
+    }
+
+    case ST_FLOW_SEQ_EXPLICIT_END: {
+        evt = evt_simple(YAM_EVT_MAPPING_END);
+        peek_token(p);
+        evt.start = p->current.start;
+        evt.end = p->current.start;
+        inc_emit(p, &evt);
+        p->state = ST_FLOW_SEQ_SEP;
+        return YAM_OK;
+    }
+
+    case ST_FLOW_SEQ_CHECK_COLON: {
+        /* After nested flow collection entry, check for ':' */
+        peek_token(p);
+        if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
+            /* nested collection as implicit pair key — rare, fall back */
+            p->state = ST_EAGER_DRAIN;
+            return YAM_OK;
+        }
+        p->state = ST_FLOW_SEQ_SEP;
+        return YAM_OK;
+    }
+
+    case ST_FLOW_SEQ_SEP: {
+        peek_token(p);
+        tt = tok_type(p);
+
+        if (tt == YAM_TOK_FLOW_ENTRY) {
+            consume_token(p);
+            p->state = ST_FLOW_SEQ_LOOP;
+            return YAM_OK;
+        }
+        if (tt == YAM_TOK_FLOW_SEQ_END) {
+            p->state = ST_FLOW_SEQ_LOOP; /* will close next iteration */
+            return YAM_OK;
+        }
+        PARSE_ERROR(p, "expected ',' or ']' in flow sequence");
+    }
+
+    case ST_FLOW_SEQ_END: {
+        yam_mark close = p->current.start;
+        yam_mark close_end = p->current.end;
+        consume_token(p); /* consume ] */
+        evt = evt_simple(YAM_EVT_SEQUENCE_END);
+        evt.start = close;
+        evt.end = close_end;
+        inc_emit(p, &evt);
+        state_frame frame = inc_pop_frame(p);
+        p->state = frame.return_state;
+        if (p->state == ST_FLOW_SEQ_SEP) return inc_flow_sep(p, true);
+        if (p->state == ST_FLOW_MAP_SEP) return inc_flow_sep(p, false);
+        return YAM_OK;
+    }
+
+    default:
+        break;
+    }
+
+    return YAM_ERR_PARSE;
+}
+
 static yam_status parser_step(yam_parser *p) {
     yam_token_type tt;
     int col;
@@ -2313,7 +2990,7 @@ static yam_status parser_step(yam_parser *p) {
         evt.start = p->current.start;
         evt.end = p->current.end;
         consume_token(p);
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
         p->state = ST_STREAM_DOC_LOOP;
         return YAM_OK;
 
@@ -2333,7 +3010,7 @@ static yam_status parser_step(yam_parser *p) {
         evt.start = p->current.start;
         evt.end = p->current.end;
         consume_token(p);
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
         p->stream_ended = true;
         p->state = ST_DONE;
         return YAM_OK;
@@ -2376,7 +3053,7 @@ static yam_status parser_step(yam_parser *p) {
             peek_token(p);
             evt.start = p->current.start;
             evt.end = p->current.end;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->doc_open = false;
         }
         peek_token(p);
@@ -2386,7 +3063,7 @@ static yam_status parser_step(yam_parser *p) {
         evt.implicit = false;
         evt.start = mark;
         evt.end = p->current.start;
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
         p->doc_open = true;
         p->state = ST_DOC_CONTENT;
         return YAM_OK;
@@ -2404,7 +3081,7 @@ static yam_status parser_step(yam_parser *p) {
             peek_token(p);
             evt.start = p->current.start;
             evt.end = p->current.end;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->doc_open = false;
         }
         peek_token(p);
@@ -2412,7 +3089,7 @@ static yam_status parser_step(yam_parser *p) {
         evt.implicit = true;
         evt.start = p->current.start;
         evt.end = p->current.end;
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
         p->doc_open = true;
         p->state = ST_DOC_CONTENT;
         return YAM_OK;
@@ -2427,7 +3104,7 @@ static yam_status parser_step(yam_parser *p) {
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.end;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->state = ST_DOC_END_EXPLICIT;
             return YAM_OK;
         }
@@ -2437,13 +3114,13 @@ static yam_status parser_step(yam_parser *p) {
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.end;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             /* close this doc implicitly */
             evt = evt_simple(YAM_EVT_DOC_END);
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.end;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->doc_open = false;
             p->state = ST_STREAM_DOC_LOOP;
             return YAM_OK;
@@ -2453,12 +3130,12 @@ static yam_status parser_step(yam_parser *p) {
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.end;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             evt = evt_simple(YAM_EVT_DOC_END);
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.end;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->doc_open = false;
             p->state = ST_STREAM_END;
             return YAM_OK;
@@ -2507,8 +3184,7 @@ static yam_status parser_step(yam_parser *p) {
              * ([flow]: value). Map values can't be keys; for other positions
              * scan ahead to check if ':' follows the matching close bracket. */
             if (p->node_return == ST_BLOCK_MAP_LOOP ||
-                !flow_is_block_key(p->input, p->input_len,
-                                   p->current.start.offset)) {
+                !flow_is_block_key(p, p->current.start.offset)) {
                 p->state = ST_FLOW_NODE;
             } else {
                 p->state = ST_EAGER_DRAIN;
@@ -2551,7 +3227,7 @@ static yam_status parser_step(yam_parser *p) {
         }
 
         /* plain scalar value */
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
 
         /* return to parent context */
         p->state = p->node_return;
@@ -2564,10 +3240,10 @@ static yam_status parser_step(yam_parser *p) {
         evt.implicit = true;
         evt.start = p->saved_node.start;
         evt.end = p->saved_node.start;
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
 
         /* emit the key scalar */
-        inc_emit(p, p->saved_node);
+        inc_emit(p, &p->saved_node);
         p->have_saved_node = false;
 
         /* push block map context — return to caller's node_return after map ends */
@@ -2602,7 +3278,7 @@ static yam_status parser_step(yam_parser *p) {
             return YAM_OK;
         }
 
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
 
         /* return to parent context */
         p->state = p->node_return;
@@ -2614,8 +3290,8 @@ static yam_status parser_step(yam_parser *p) {
         evt.implicit = true;
         evt.start = p->saved_node.start;
         evt.end = p->saved_node.start;
-        inc_emit(p, evt);
-        inc_emit(p, p->saved_node);
+        inc_emit(p, &evt);
+        inc_emit(p, &p->saved_node);
         p->have_saved_node = false;
         inc_push_frame(p, CTX_BLOCK_MAP, p->saved_node_col, p->node_return);
         p->state = ST_BLOCK_MAP_VALUE;
@@ -2629,7 +3305,7 @@ static yam_status parser_step(yam_parser *p) {
         evt.start = p->current.start;
         evt.end = p->current.start;
 
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
         inc_push_frame(p, CTX_BLOCK_SEQ, seq_indent, p->node_return);
         p->state = ST_BLOCK_SEQ_LOOP;
         return YAM_OK;
@@ -2643,7 +3319,7 @@ static yam_status parser_step(yam_parser *p) {
         evt.start = p->current.start;
         evt.end = p->current.start;
 
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
         inc_push_frame(p, CTX_BLOCK_MAP, map_indent, p->node_return);
         p->state = ST_BLOCK_MAP_LOOP;
         return YAM_OK;
@@ -2657,7 +3333,7 @@ static yam_status parser_step(yam_parser *p) {
         evt.start = p->current.start;
         evt.end = p->current.start;
 
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
         inc_push_frame(p, CTX_BLOCK_MAP, map_indent, p->node_return);
 
         /* emit empty key */
@@ -2665,7 +3341,7 @@ static yam_status parser_step(yam_parser *p) {
         evt.implicit = true;
         evt.start = p->current.start;
         evt.end = p->current.start;
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
 
         p->state = ST_BLOCK_MAP_VALUE;
         return YAM_OK;
@@ -2677,7 +3353,7 @@ static yam_status parser_step(yam_parser *p) {
         evt.implicit = true;
         evt.start = p->current.start;
         evt.end = p->current.end;
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
 
         /* return to parent context */
         p->state = p->node_return;
@@ -2712,7 +3388,7 @@ static yam_status parser_step(yam_parser *p) {
             peek_token(p);
             evt.start = p->current.start;
             evt.end = p->current.start;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->state = ST_BLOCK_MAP_VALUE;
             return YAM_OK;
         }
@@ -2751,7 +3427,7 @@ static yam_status parser_step(yam_parser *p) {
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.start;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->state = ST_BLOCK_MAP_VALUE;
         } else {
             /* The key is a block node */
@@ -2780,7 +3456,7 @@ static yam_status parser_step(yam_parser *p) {
             /* must be followed by ':' */
             peek_token(p);
             if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
-                inc_emit(p, evt);
+                inc_emit(p, &evt);
                 p->state = ST_BLOCK_MAP_VALUE;
             } else {
                 /* Not a key — fall back to eager since this shouldn't happen
@@ -2799,7 +3475,7 @@ static yam_status parser_step(yam_parser *p) {
 
             peek_token(p);
             if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
-                inc_emit(p, evt);
+                inc_emit(p, &evt);
                 p->state = ST_BLOCK_MAP_VALUE;
             } else {
                 p->state = ST_EAGER_DRAIN;
@@ -2825,7 +3501,7 @@ static yam_status parser_step(yam_parser *p) {
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.start;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->state = ST_BLOCK_MAP_LOOP;
         }
         return YAM_OK;
@@ -2840,7 +3516,7 @@ static yam_status parser_step(yam_parser *p) {
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.start;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->state = ST_BLOCK_MAP_LOOP;
             return YAM_OK;
         }
@@ -2860,7 +3536,7 @@ static yam_status parser_step(yam_parser *p) {
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.start;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->state = ST_BLOCK_MAP_LOOP;
             return YAM_OK;
         }
@@ -2872,7 +3548,7 @@ static yam_status parser_step(yam_parser *p) {
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.start;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->state = ST_BLOCK_MAP_LOOP;
             return YAM_OK;
         }
@@ -2883,7 +3559,7 @@ static yam_status parser_step(yam_parser *p) {
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.start;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->state = ST_BLOCK_MAP_LOOP;
             return YAM_OK;
         }
@@ -2892,7 +3568,7 @@ static yam_status parser_step(yam_parser *p) {
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.start;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->state = ST_BLOCK_MAP_LOOP;
             return YAM_OK;
         }
@@ -2914,7 +3590,7 @@ static yam_status parser_step(yam_parser *p) {
         peek_token(p);
         evt.start = p->current.start;
         evt.end = p->current.end;
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
 
         /* handle doc close for top-level mapping */
         p->state = frame.return_state;
@@ -2927,7 +3603,7 @@ static yam_status parser_step(yam_parser *p) {
                 evt.implicit = false;
                 evt.start = p->current.start;
                 evt.end = p->current.end;
-                inc_emit(p, evt);
+                inc_emit(p, &evt);
                 p->doc_open = false;
                 p->state = ST_STREAM_DOC_LOOP;
             } else {
@@ -2935,7 +3611,7 @@ static yam_status parser_step(yam_parser *p) {
                 evt.implicit = true;
                 evt.start = p->current.start;
                 evt.end = p->current.end;
-                inc_emit(p, evt);
+                inc_emit(p, &evt);
                 p->doc_open = false;
                 p->state = ST_STREAM_DOC_LOOP;
             }
@@ -2978,7 +3654,7 @@ static yam_status parser_step(yam_parser *p) {
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.start;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->state = ST_BLOCK_SEQ_LOOP;
             return YAM_OK;
         }
@@ -2988,7 +3664,7 @@ static yam_status parser_step(yam_parser *p) {
             evt.implicit = true;
             evt.start = p->current.start;
             evt.end = p->current.start;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             p->state = ST_BLOCK_SEQ_LOOP;
             return YAM_OK;
         }
@@ -3009,7 +3685,7 @@ static yam_status parser_step(yam_parser *p) {
         peek_token(p);
         evt.start = p->current.start;
         evt.end = p->current.end;
-        inc_emit(p, evt);
+        inc_emit(p, &evt);
 
         p->state = frame.return_state;
         if (p->state == ST_DOC_END_EXPLICIT) {
@@ -3021,7 +3697,7 @@ static yam_status parser_step(yam_parser *p) {
                 evt.implicit = false;
                 evt.start = p->current.start;
                 evt.end = p->current.end;
-                inc_emit(p, evt);
+                inc_emit(p, &evt);
                 p->doc_open = false;
                 p->state = ST_STREAM_DOC_LOOP;
             } else {
@@ -3029,7 +3705,7 @@ static yam_status parser_step(yam_parser *p) {
                 evt.implicit = true;
                 evt.start = p->current.start;
                 evt.end = p->current.end;
-                inc_emit(p, evt);
+                inc_emit(p, &evt);
                 p->doc_open = false;
                 p->state = ST_STREAM_DOC_LOOP;
             }
@@ -3049,7 +3725,7 @@ static yam_status parser_step(yam_parser *p) {
             peek_token(p);
             evt.start = p->current.start;
             evt.end = p->current.end;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
             return YAM_OK;
         }
         /* all frames popped, continue to the return state */
@@ -3066,467 +3742,28 @@ static yam_status parser_step(yam_parser *p) {
             evt.implicit = false;
             evt.start = p->current.start;
             evt.end = p->current.end;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
         } else {
             evt = evt_simple(YAM_EVT_DOC_END);
             evt.implicit = true;
             peek_token(p);
             evt.start = p->current.start;
             evt.end = p->current.end;
-            inc_emit(p, evt);
+            inc_emit(p, &evt);
         }
         p->doc_open = false;
         p->state = ST_STREAM_DOC_LOOP;
         return YAM_OK;
     }
 
-    /* ── Flow node dispatch (incremental) ──────────────────── */
-
-    case ST_FLOW_NODE: {
-        peek_token(p);
-        tt = tok_type(p);
-
-        /* consume properties if present */
-        if (tt == YAM_TOK_TAG || tt == YAM_TOK_ANCHOR) {
-            yam_status st = consume_props(p);
-            if (st != YAM_OK) return st;
-            peek_token(p);
-            tt = tok_type(p);
-        }
-
-        if (tt == YAM_TOK_SCALAR) {
-            evt = evt_simple(YAM_EVT_SCALAR);
-            evt.value = p->current.value;
-            evt.scalar_style = p->current.scalar_style;
-            evt.start = p->current.start;
-            evt.end = p->current.end;
-            attach_props(p, &evt);
-            consume_token(p);
-            inc_emit(p, evt);
-            p->state = p->node_return;
-            return YAM_OK;
-        }
-
-        if (tt == YAM_TOK_ALIAS) {
-            evt = evt_simple(YAM_EVT_ALIAS);
-            evt.value = p->current.value;
-            evt.start = p->current.start;
-            evt.end = p->current.end;
-            attach_props(p, &evt);
-            consume_token(p);
-            inc_emit(p, evt);
-            p->state = p->node_return;
-            return YAM_OK;
-        }
-
-        if (tt == YAM_TOK_FLOW_SEQ_START) {
-            col = tok_col(p);
-            evt = evt_simple(YAM_EVT_SEQUENCE_START);
-            evt.flow = true;
-            evt.start = p->current.start;
-            evt.end = p->current.end;
-            attach_props(p, &evt);
-            consume_token(p);
-            inc_emit(p, evt);
-            inc_push_frame(p, CTX_FLOW_SEQ, col, p->node_return);
-            p->state = ST_FLOW_SEQ_LOOP;
-            return YAM_OK;
-        }
-
-        if (tt == YAM_TOK_FLOW_MAP_START) {
-            col = tok_col(p);
-            evt = evt_simple(YAM_EVT_MAPPING_START);
-            evt.flow = true;
-            evt.start = p->current.start;
-            evt.end = p->current.end;
-            attach_props(p, &evt);
-            consume_token(p);
-            inc_emit(p, evt);
-            inc_push_frame(p, CTX_FLOW_MAP, col, p->node_return);
-            p->state = ST_FLOW_MAP_LOOP;
-            return YAM_OK;
-        }
-
-        /* empty node */
-        evt = evt_simple(YAM_EVT_SCALAR);
-        evt.start = p->current.start;
-        evt.end = p->current.start;
-        attach_props(p, &evt);
-        inc_emit(p, evt);
-        p->state = p->node_return;
-        return YAM_OK;
-    }
-
-    /* ── Flow mapping states (incremental) ─────────────────── */
-
-    case ST_FLOW_MAP_LOOP: {
-        if (p->oom) return YAM_ERR_MEMORY;
-        peek_token(p);
-        tt = tok_type(p);
-
-        if (tt == YAM_TOK_FLOW_MAP_END) {
-            p->state = ST_FLOW_MAP_END;
-            return YAM_OK;
-        }
-
-        /* explicit key: ? */
-        if (tt == YAM_TOK_BLOCK_MAP_KEY) {
-            consume_token(p);
-            peek_token(p);
-            tt = tok_type(p);
-            if (tt == YAM_TOK_BLOCK_MAP_VALUE ||
-                tt == YAM_TOK_FLOW_ENTRY ||
-                tt == YAM_TOK_FLOW_MAP_END) {
-                /* empty key */
-                evt = evt_simple(YAM_EVT_SCALAR);
-                evt.start = p->current.start;
-                evt.end = p->current.start;
-                inc_emit(p, evt);
-                p->state = ST_FLOW_MAP_VALUE;
-            } else {
-                p->node_return = ST_FLOW_MAP_VALUE;
-                p->state = ST_FLOW_NODE;
-            }
-            return YAM_OK;
-        }
-
-        /* implicit key: dispatch to flow node, then check for : */
-        p->node_return = ST_FLOW_MAP_VALUE;
-        p->state = ST_FLOW_NODE;
-        return YAM_OK;
-    }
-
-    case ST_FLOW_MAP_VALUE: {
-        peek_token(p);
-        tt = tok_type(p);
-
-        if (tt == YAM_TOK_BLOCK_MAP_VALUE) {
-            consume_token(p);
-            peek_token(p);
-            tt = tok_type(p);
-            if (tt == YAM_TOK_FLOW_ENTRY ||
-                tt == YAM_TOK_FLOW_MAP_END) {
-                /* empty value */
-                evt = evt_simple(YAM_EVT_SCALAR);
-                evt.start = p->current.start;
-                evt.end = p->current.start;
-                inc_emit(p, evt);
-                p->state = ST_FLOW_MAP_SEP;
-            } else {
-                p->node_return = ST_FLOW_MAP_SEP;
-                p->state = ST_FLOW_NODE;
-            }
-        } else {
-            /* no ':', emit empty value */
-            evt = evt_simple(YAM_EVT_SCALAR);
-            evt.start = p->current.start;
-            evt.end = p->current.start;
-            inc_emit(p, evt);
-            p->state = ST_FLOW_MAP_SEP;
-        }
-        return YAM_OK;
-    }
-
-    case ST_FLOW_MAP_SEP: {
-        peek_token(p);
-        tt = tok_type(p);
-
-        if (tt == YAM_TOK_FLOW_ENTRY) {
-            consume_token(p);
-            p->state = ST_FLOW_MAP_LOOP;
-            return YAM_OK;
-        }
-        if (tt == YAM_TOK_FLOW_MAP_END) {
-            p->state = ST_FLOW_MAP_LOOP; /* will close next iteration */
-            return YAM_OK;
-        }
-        PARSE_ERROR(p, "expected ',' or '}' in flow mapping");
-    }
-
-    case ST_FLOW_MAP_END: {
-        yam_mark close = p->current.start;
-        yam_mark close_end = p->current.end;
-        consume_token(p); /* consume } */
-        evt = evt_simple(YAM_EVT_MAPPING_END);
-        evt.start = close;
-        evt.end = close_end;
-        inc_emit(p, evt);
-        state_frame frame = inc_pop_frame(p);
-        p->state = frame.return_state;
-        return YAM_OK;
-    }
-
-    /* ── Flow sequence states (incremental) ────────────────── */
-
-    case ST_FLOW_SEQ_LOOP: {
-        if (p->oom) return YAM_ERR_MEMORY;
-        peek_token(p);
-        tt = tok_type(p);
-
-        if (tt == YAM_TOK_FLOW_SEQ_END) {
-            p->state = ST_FLOW_SEQ_END;
-            return YAM_OK;
-        }
-
-        /* explicit pair: ? key : value */
-        if (tt == YAM_TOK_BLOCK_MAP_KEY) {
-            p->state = ST_FLOW_SEQ_EXPLICIT_KEY;
-            return YAM_OK;
-        }
-
-        /* scalar or alias: potential implicit pair key */
-        if (tt == YAM_TOK_SCALAR || tt == YAM_TOK_ALIAS) {
-            p->state = ST_FLOW_SEQ_ENTRY;
-            return YAM_OK;
-        }
-
-        /* nested flow collection as entry — could be implicit pair key
-         * ([{a}: val]) which we can't handle incrementally.  Scan ahead
-         * to the matching close bracket: if ':' follows it's a pair key
-         * and we fall back to eager; otherwise parse incrementally. */
-        if (tt == YAM_TOK_FLOW_SEQ_START || tt == YAM_TOK_FLOW_MAP_START) {
-            if (flow_is_block_key(p->input, p->input_len,
-                                  p->current.start.offset)) {
-                p->state = ST_EAGER_DRAIN;
-            } else {
-                p->node_return = ST_FLOW_SEQ_SEP;
-                p->state = ST_FLOW_NODE;
-            }
-            return YAM_OK;
-        }
-
-        /* implicit pair with empty key: [ : value ] */
-        if (tt == YAM_TOK_BLOCK_MAP_VALUE) {
-            evt = evt_simple(YAM_EVT_MAPPING_START);
-            evt.flow = true;
-            evt.start = p->current.start;
-            evt.end = p->current.start;
-            inc_emit(p, evt);
-
-            /* emit empty key */
-            evt = evt_simple(YAM_EVT_SCALAR);
-            evt.start = p->current.start;
-            evt.end = p->current.start;
-            inc_emit(p, evt);
-
-            consume_token(p); /* consume : */
-
-            /* parse value */
-            peek_token(p);
-            tt = tok_type(p);
-            if (tt == YAM_TOK_FLOW_ENTRY ||
-                tt == YAM_TOK_FLOW_SEQ_END) {
-                evt = evt_simple(YAM_EVT_SCALAR);
-                evt.start = p->current.start;
-                evt.end = p->current.start;
-                inc_emit(p, evt);
-                p->state = ST_FLOW_SEQ_IMPLICIT_END;
-            } else {
-                p->node_return = ST_FLOW_SEQ_IMPLICIT_END;
-                p->state = ST_FLOW_NODE;
-            }
-            return YAM_OK;
-        }
-
-        /* TAG/ANCHOR: consume props, re-enter loop */
-        if (tt == YAM_TOK_TAG || tt == YAM_TOK_ANCHOR) {
-            yam_status st = consume_props(p);
-            if (st != YAM_OK) return st;
-            /* props consumed, stay in ST_FLOW_SEQ_LOOP to re-dispatch */
-            return YAM_OK;
-        }
-
-        /* comma: empty entry */
-        if (tt == YAM_TOK_FLOW_ENTRY) {
-            consume_token(p);
-            /* stay in LOOP — next iteration handles the entry */
-            return YAM_OK;
-        }
-
-        PARSE_ERROR(p, "unexpected token in flow sequence");
-    }
-
-    case ST_FLOW_SEQ_ENTRY: {
-        /* Parse scalar/alias, peek for ':' to detect implicit pair */
-        peek_token(p);
-        tt = tok_type(p);
-
-        if (tt == YAM_TOK_SCALAR) {
-            evt = evt_simple(YAM_EVT_SCALAR);
-            evt.value = p->current.value;
-            evt.scalar_style = p->current.scalar_style;
-            evt.start = p->current.start;
-            evt.end = p->current.end;
-        } else { /* ALIAS */
-            evt = evt_simple(YAM_EVT_ALIAS);
-            evt.value = p->current.value;
-            evt.start = p->current.start;
-            evt.end = p->current.end;
-        }
-        attach_props(p, &evt);
-        consume_token(p);
-
-        /* peek for ':' — implicit pair detection */
-        peek_token(p);
-        if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
-            p->saved_node = evt;
-            p->have_saved_node = true;
-            p->state = ST_FLOW_SEQ_ENTRY_KEY;
-            return YAM_OK;
-        }
-
-        /* plain entry, not a pair */
-        inc_emit(p, evt);
-        p->state = ST_FLOW_SEQ_SEP;
-        return YAM_OK;
-    }
-
-    case ST_FLOW_SEQ_ENTRY_KEY: {
-        /* Implicit pair detected: emit MAPPING_START + saved key */
-        evt = evt_simple(YAM_EVT_MAPPING_START);
-        evt.flow = true;
-        evt.start = p->saved_node.start;
-        evt.end = p->saved_node.start;
-        inc_emit(p, evt);
-        inc_emit(p, p->saved_node);
-        p->have_saved_node = false;
-
-        /* consume ':' */
-        consume_token(p);
-
-        /* check for empty value */
-        peek_token(p);
-        tt = tok_type(p);
-        if (tt == YAM_TOK_FLOW_ENTRY || tt == YAM_TOK_FLOW_SEQ_END) {
-            evt = evt_simple(YAM_EVT_SCALAR);
-            evt.start = p->current.start;
-            evt.end = p->current.start;
-            inc_emit(p, evt);
-            p->state = ST_FLOW_SEQ_IMPLICIT_END;
-        } else {
-            p->node_return = ST_FLOW_SEQ_IMPLICIT_END;
-            p->state = ST_FLOW_NODE;
-        }
-        return YAM_OK;
-    }
-
-    case ST_FLOW_SEQ_IMPLICIT_END: {
-        evt = evt_simple(YAM_EVT_MAPPING_END);
-        peek_token(p);
-        evt.start = p->current.start;
-        evt.end = p->current.start;
-        inc_emit(p, evt);
-        p->state = ST_FLOW_SEQ_SEP;
-        return YAM_OK;
-    }
-
-    case ST_FLOW_SEQ_EXPLICIT_KEY: {
-        /* ? key : value pair in flow sequence */
-        evt = evt_simple(YAM_EVT_MAPPING_START);
-        evt.flow = true;
-        evt.start = p->current.start;
-        evt.end = p->current.end;
-        inc_emit(p, evt);
-
-        consume_token(p); /* consume ? */
-
-        peek_token(p);
-        tt = tok_type(p);
-        if (tt == YAM_TOK_BLOCK_MAP_VALUE ||
-            tt == YAM_TOK_FLOW_ENTRY ||
-            tt == YAM_TOK_FLOW_SEQ_END) {
-            /* empty key */
-            evt = evt_simple(YAM_EVT_SCALAR);
-            evt.start = p->current.start;
-            evt.end = p->current.start;
-            inc_emit(p, evt);
-            p->state = ST_FLOW_SEQ_EXPLICIT_VALUE;
-        } else {
-            p->node_return = ST_FLOW_SEQ_EXPLICIT_VALUE;
-            p->state = ST_FLOW_NODE;
-        }
-        return YAM_OK;
-    }
-
-    case ST_FLOW_SEQ_EXPLICIT_VALUE: {
-        peek_token(p);
-        tt = tok_type(p);
-        if (tt == YAM_TOK_BLOCK_MAP_VALUE) {
-            consume_token(p);
-            peek_token(p);
-            tt = tok_type(p);
-            if (tt == YAM_TOK_FLOW_ENTRY ||
-                tt == YAM_TOK_FLOW_SEQ_END) {
-                evt = evt_simple(YAM_EVT_SCALAR);
-                evt.start = p->current.start;
-                evt.end = p->current.start;
-                inc_emit(p, evt);
-            } else {
-                p->node_return = ST_FLOW_SEQ_EXPLICIT_END;
-                p->state = ST_FLOW_NODE;
-                return YAM_OK;
-            }
-        } else {
-            /* no value indicator, emit empty */
-            evt = evt_simple(YAM_EVT_SCALAR);
-            evt.start = p->current.start;
-            evt.end = p->current.start;
-            inc_emit(p, evt);
-        }
-        p->state = ST_FLOW_SEQ_EXPLICIT_END;
-        return YAM_OK;
-    }
-
-    case ST_FLOW_SEQ_EXPLICIT_END: {
-        evt = evt_simple(YAM_EVT_MAPPING_END);
-        peek_token(p);
-        evt.start = p->current.start;
-        evt.end = p->current.start;
-        inc_emit(p, evt);
-        p->state = ST_FLOW_SEQ_SEP;
-        return YAM_OK;
-    }
-
-    case ST_FLOW_SEQ_CHECK_COLON: {
-        /* After nested flow collection entry, check for ':' */
-        peek_token(p);
-        if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
-            /* nested collection as implicit pair key — rare, fall back */
-            p->state = ST_EAGER_DRAIN;
-            return YAM_OK;
-        }
-        p->state = ST_FLOW_SEQ_SEP;
-        return YAM_OK;
-    }
-
-    case ST_FLOW_SEQ_SEP: {
-        peek_token(p);
-        tt = tok_type(p);
-
-        if (tt == YAM_TOK_FLOW_ENTRY) {
-            consume_token(p);
-            p->state = ST_FLOW_SEQ_LOOP;
-            return YAM_OK;
-        }
-        if (tt == YAM_TOK_FLOW_SEQ_END) {
-            p->state = ST_FLOW_SEQ_LOOP; /* will close next iteration */
-            return YAM_OK;
-        }
-        PARSE_ERROR(p, "expected ',' or ']' in flow sequence");
-    }
-
-    case ST_FLOW_SEQ_END: {
-        yam_mark close = p->current.start;
-        yam_mark close_end = p->current.end;
-        consume_token(p); /* consume ] */
-        evt = evt_simple(YAM_EVT_SEQUENCE_END);
-        evt.start = close;
-        evt.end = close_end;
-        inc_emit(p, evt);
-        state_frame frame = inc_pop_frame(p);
-        p->state = frame.return_state;
-        return YAM_OK;
-    }
+    case ST_FLOW_NODE:
+    case ST_FLOW_MAP_LOOP: case ST_FLOW_MAP_VALUE: case ST_FLOW_MAP_SEP:
+    case ST_FLOW_MAP_END:
+    case ST_FLOW_SEQ_LOOP: case ST_FLOW_SEQ_ENTRY: case ST_FLOW_SEQ_ENTRY_KEY:
+    case ST_FLOW_SEQ_IMPLICIT_END: case ST_FLOW_SEQ_EXPLICIT_KEY:
+    case ST_FLOW_SEQ_EXPLICIT_VALUE: case ST_FLOW_SEQ_EXPLICIT_END:
+    case ST_FLOW_SEQ_CHECK_COLON: case ST_FLOW_SEQ_SEP: case ST_FLOW_SEQ_END:
+        return parser_step_flow(p);
 
     case ST_EAGER_DRAIN:
         /* Signal to yam_parse_next to fall back to eager mode */
@@ -3645,18 +3882,27 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
         return YAM_OK;
     }
 
+    /* a scanner error hit while reading ahead is reported once the events
+     * produced before it have been delivered */
+    if (p->scan_error) return p->scan_error;
+
     /* step the state machine until it produces output or finishes */
     p->out_len = 0;
     p->out_cursor = 0;
     while (p->out_len == 0) {
         yam_status st = parser_step(p);
+        if (p->scan_error) {
+            /* keep only events produced before the error; states may emit
+             * more after a failed peek, based on a stale token */
+            p->out_len = p->scan_error_out;
+            if (p->out_len > 0) break; /* drain valid events first */
+            return p->scan_error;
+        }
         if (st != YAM_OK) return st;
         if (p->oom) {
             if (p->out_len > 0) break; /* drain valid events first */
             return YAM_ERR_MEMORY;
         }
-        /* check for scanner error ignored by state machine */
-        if (p->scan_error) return p->scan_error;
 
         if (p->state == ST_EAGER_DRAIN) {
             /* fall back to eager: re-parse from scratch */
@@ -3743,5 +3989,7 @@ void yam_parser_free(yam_parser *p) {
     free(p->contexts);
     free(p->events);
     free(p->frames);
+    free(p->fk_keys);
+    free(p->fk_stack);
     free(p);
 }

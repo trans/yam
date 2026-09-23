@@ -320,15 +320,18 @@ Throughput on a 10 MB generated YAML document (GCC -O2 -march=native, SSE4.2):
 ```
   Component                    Avg MB/s    Best MB/s
   ──────────────────────────────────────────────────
-  Scanner                      423         425
-  Parser (block YAML)          175         178
-  Parser (mixed YAML)          202         207
-  Parser (JSON)                138         139
+  Scanner                      408         419
+  Parser (block YAML)          167         169
+  Parser (mixed YAML)          212         214
+  Parser (JSON)                200         205
 ```
 
 The parser uses an incremental state machine for both block and flow
 context YAML, with a byte-scanning lookahead to avoid eager fallback
-for nested flow collections. Tags, schemas, merge keys, and alias
+for nested flow collections. The lookahead result is cached for every
+collection nested inside the one scanned, so it stays linear however
+deeply collections nest. Quoted scalars without escapes or line breaks
+are returned as zero-copy slices of the input. Tags, schemas, merge keys, and alias
 resolution fall back to eager evaluation automatically.
 
 Run `make bench` to test on your hardware. Use `make bench-cmp` to include

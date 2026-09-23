@@ -51,10 +51,11 @@ TEST_EMITTER := $(OBJDIR)/test_emitter
 TEST_MERGE := $(OBJDIR)/test_merge
 TEST_RESOLVE := $(OBJDIR)/test_resolve
 TEST_ERRORS := $(OBJDIR)/test_errors
+TEST_FLOW := $(OBJDIR)/test_flow
 
 .PHONY: all static shared pkgconfig install uninstall dist version \
         clean test test-suite test-schema test-emitter test-merge \
-        test-resolve test-errors test-all bench bench-parser bench-cmp bench-parser-cmp
+        test-resolve test-errors test-flow test-all bench bench-parser bench-cmp bench-parser-cmp
 
 all: $(LIB) $(TEST)
 
@@ -161,6 +162,9 @@ $(TEST_RESOLVE): $(TESTDIR)/test_resolve.c $(LIB)
 $(TEST_ERRORS): $(TESTDIR)/test_errors.c $(LIB)
 	$(CC) $(YAM_CFLAGS) $< $(LIB) -o $@
 
+$(TEST_FLOW): $(TESTDIR)/test_flow.c $(LIB)
+	$(CC) $(YAM_CFLAGS) $< $(LIB) -o $@
+
 test: $(TEST)
 	@echo "─── Running scanner tests ───"
 	@./$(TEST)
@@ -189,7 +193,11 @@ test-errors: $(TEST_ERRORS)
 	@echo "─── Running error tests ───"
 	@./$(TEST_ERRORS)
 
-test-all: test test-suite test-schema test-emitter test-merge test-resolve test-errors
+test-flow: $(TEST_FLOW)
+	@echo "─── Running flow tests ───"
+	@./$(TEST_FLOW)
+
+test-all: test test-suite test-schema test-emitter test-merge test-resolve test-errors test-flow
 
 bench: $(OBJDIR)/bench_scanner $(OBJDIR)/bench_parser
 	@./$(OBJDIR)/bench_scanner $(SIZE)
