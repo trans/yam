@@ -631,6 +631,162 @@ static test_result run_test(test_case *tc, bool verbose, bool eager) {
     return RESULT_PASS;
 }
 
+/* ── Emitter round trip ──────────────────────────────────── */
+
+/* Every valid case must survive parse -> emit -> parse with the same
+ * meaning: event types, scalar values, anchors, tags, alias names, and
+ * for untagged scalars the type they resolve to under the core schema
+ * (plain 42 is an int, quoted "42" a string). Quoting style, flow vs block
+ * and positions may differ. An empty plain scalar and a plain "~" are
+ * both null and compare equal (the emitter writes ~ for an empty entry in
+ * a flow sequence). */
+
+static size_t canon_str(char *out, size_t cap, yam_str s) {
+    size_t n = 0;
+    for (size_t i = 0; i < s.len && n + 4 < cap; i++) {
+        unsigned char c = (unsigned char)s.data[i];
+        if (c == '\\') { out[n++] = '\\'; out[n++] = '\\'; }
+        else if (c == '\n') { out[n++] = '\\'; out[n++] = 'n'; }
+        else if (c < 0x20) n += (size_t)snprintf(out + n, cap - n, "\\x%02x", c);
+        else out[n++] = (char)c;
+    }
+    return n;
+}
+
+static size_t canon_event(const yam_event *e, char *out, size_t cap) {
+    size_t n = 0;
+    if (cap < 64) return 0;
+    switch (e->type) {
+    case YAM_EVT_STREAM_START: case YAM_EVT_STREAM_END: return 0;
+    case YAM_EVT_DOC_START:      n += (size_t)snprintf(out + n, cap - n, "+DOC"); break;
+    case YAM_EVT_DOC_END:        n += (size_t)snprintf(out + n, cap - n, "-DOC"); break;
+    case YAM_EVT_MAPPING_START:  n += (size_t)snprintf(out + n, cap - n, "+MAP"); break;
+    case YAM_EVT_MAPPING_END:    n += (size_t)snprintf(out + n, cap - n, "-MAP"); break;
+    case YAM_EVT_SEQUENCE_START: n += (size_t)snprintf(out + n, cap - n, "+SEQ"); break;
+    case YAM_EVT_SEQUENCE_END:   n += (size_t)snprintf(out + n, cap - n, "-SEQ"); break;
+    case YAM_EVT_SCALAR:         n += (size_t)snprintf(out + n, cap - n, "=VAL"); break;
+    case YAM_EVT_ALIAS:          n += (size_t)snprintf(out + n, cap - n, "=ALI *"); break;
+    default: return 0;
+    }
+    if (e->anchor.data && e->anchor.len) {
+        n += (size_t)snprintf(out + n, cap - n, " &");
+        n += canon_str(out + n, cap - n, e->anchor);
+    }
+    if (e->tag.data && e->tag.len) {
+        n += (size_t)snprintf(out + n, cap - n, " <");
+        n += canon_str(out + n, cap - n, e->tag);
+        n += (size_t)snprintf(out + n, cap - n, ">");
+    }
+    if (e->type == YAM_EVT_SCALAR) {
+        bool plain = e->scalar_style == YAM_SCALAR_PLAIN;
+        bool untagged = !(e->tag.data && e->tag.len);
+        bool null_text = untagged && plain && (e->value.len == 0 ||
+                                   (e->value.len == 1 && e->value.data[0] == '~'));
+        if (null_text) {
+            n += (size_t)snprintf(out + n, cap - n, " :~");
+        } else {
+            if (!(e->tag.data && e->tag.len)) {
+                /* untagged: the core schema type is part of the meaning */
+                yam_str t = yam_schema_resolve(yam_schema_core(), e->value, e->scalar_style);
+                const char *short_tag = strrchr(t.data, ':');
+                n += (size_t)snprintf(out + n, cap - n, " (%.*s)",
+                                      (int)(t.len - (size_t)(short_tag + 1 - t.data)),
+                                      short_tag + 1);
+            }
+            n += (size_t)snprintf(out + n, cap - n, " :");
+            n += canon_str(out + n, cap - n, e->value);
+        }
+    } else if (e->type == YAM_EVT_ALIAS) {
+        n += canon_str(out + n, cap - n, e->value);
+    }
+    if (n + 2 < cap) out[n++] = '\n';
+    out[n] = '\0';
+    return n;
+}
+
+/* Parse `yaml` and write its canonical event stream to `out`. When `e` is
+ * given, also feed every event to it. Returns false on a parse error. */
+static bool canon_parse(const char *yaml, size_t len, bool eager, yam_emitter *e,
+                        char *out, size_t cap) {
+    yam_arena *a = yam_arena_new(4096);
+    yam_parser *p = yam_parser_new(yaml, len, a);
+    if (eager) yam_parser_set_merge(p, true);
+    yam_parser_set_max_events(p, 0);
+    const yam_event *evt;
+    yam_status st;
+    size_t n = 0;
+    out[0] = '\0';
+    while ((st = yam_parse_next(p, &evt)) == YAM_OK && evt->type != YAM_EVT_NONE) {
+        if (e) yam_emit(e, evt);
+        n += canon_event(evt, out + n, cap - n);
+        if (evt->type == YAM_EVT_STREAM_END) break;
+    }
+    yam_parser_free(p);
+    yam_arena_free(a);
+    return st == YAM_OK;
+}
+
+static const char *style_name(yam_emit_style st) {
+    return st == YAM_EMIT_BLOCK ? "block" : st == YAM_EMIT_FLOW ? "flow" : "minimal";
+}
+
+/* Round-trip one case in one mode and style; on failure describe it. */
+static bool roundtrip_ok(const test_case *tc, bool eager, yam_emit_style style,
+                         bool verbose) {
+    static char before[65536], after[65536];
+    size_t len = strlen(tc->yaml);
+    yam_arena *a = yam_arena_new(4096);
+    yam_emitter *e = yam_emitter_new(a);
+    yam_emitter_set_style(e, style);
+
+    bool ok = canon_parse(tc->yaml, len, eager, e, before, sizeof before);
+    yam_str out = yam_emitter_output(e);
+    const char *why = NULL;
+    if (ok) {
+        if (!canon_parse(out.data ? out.data : "", out.len, eager, NULL, after, sizeof after))
+            why = "emitted YAML does not parse";
+        else if (strcmp(before, after) != 0)
+            why = "emitted YAML parses to different events";
+    }
+    if (why && verbose) {
+        printf("    round trip (%s, %s): %s\n", eager ? "eager" : "incremental",
+               style_name(style), why);
+        printf("      emitted: %.*s\n", (int)(out.len > 300 ? 300 : out.len),
+               out.data ? out.data : "");
+        if (strcmp(why, "emitted YAML parses to different events") == 0) {
+            /* show the first differing event */
+            const char *b = before, *c = after;
+            while (*b && *b == *c) {
+                const char *nb = strchr(b, '\n'), *nc = strchr(c, '\n');
+                if (!nb || !nc || (nb - b) != (nc - c) || memcmp(b, c, (size_t)(nb - b))) break;
+                b = nb + 1; c = nc + 1;
+            }
+            printf("      expected: %.*s\n", (int)strcspn(b, "\n"), b);
+            printf("      got:      %.*s\n", (int)strcspn(c, "\n"), c);
+        }
+    }
+    yam_emitter_free(e);
+    yam_arena_free(a);
+    return why == NULL;
+}
+
+/* Valid cases whose round trip is known to fail (label:style). Listed
+ * failures report XFAIL; one that starts passing reports XPASS and fails
+ * the run until removed. */
+static const char *known_roundtrip_failures[] = {
+    NULL
+};
+
+static bool is_known_roundtrip_failure(const char *label, yam_emit_style style) {
+    char key[400];
+    snprintf(key, sizeof key, "%s:%s", label, style_name(style));
+    for (size_t i = 0; known_roundtrip_failures[i]; i++)
+        if (strcmp(known_roundtrip_failures[i], key) == 0) return true;
+    return false;
+}
+
+static int rt_passed = 0, rt_failed = 0, rt_xfailed = 0, rt_xpassed = 0;
+
 /* ── Main ────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
@@ -709,6 +865,27 @@ int main(int argc, char **argv) {
                 continue;
             }
 
+            /* valid cases must also survive an emitter round trip */
+            if (result == RESULT_PASS && !tc->fail && strlen(tc->tree) > 0) {
+                const yam_emit_style styles[] = { YAM_EMIT_BLOCK, YAM_EMIT_FLOW, YAM_EMIT_MINIMAL };
+                for (int si = 0; si < 3; si++) {
+                    bool ok = roundtrip_ok(tc, false, styles[si], verbose) &&
+                              roundtrip_ok(tc, true, styles[si], verbose);
+                    bool known = is_known_roundtrip_failure(label, styles[si]);
+                    if (ok && !known) rt_passed++;
+                    else if (!ok && known) rt_xfailed++;
+                    else if (ok && known) {
+                        rt_xpassed++;
+                        printf("  %-8s round trip %-8s " YELLOW "XPASS (now passes: remove from known list)" RESET "\n",
+                               label, style_name(styles[si]));
+                    } else {
+                        rt_failed++;
+                        printf("  %-8s round trip %-8s " RED "FAIL" RESET "  %s\n",
+                               label, style_name(styles[si]), tc->name);
+                    }
+                }
+            }
+
             switch (result) {
             case RESULT_PASS:
                 passed++;
@@ -742,7 +919,11 @@ int main(int argc, char **argv) {
     printf(DIM "Skip: %d" RESET, skipped);
     printf("\n  Known accepted invalid (XFAIL): %d", xfailed);
     if (xpassed) printf(YELLOW "  XPASS: %d" RESET, xpassed);
+    printf("\n  Emitter round trip: " GREEN "Pass: %d  " RESET RED "Fail: %d  " RESET
+           "Known (XFAIL): %d", rt_passed, rt_failed, rt_xfailed);
+    if (rt_xpassed) printf(YELLOW "  XPASS: %d" RESET, rt_xpassed);
     printf("\n\n");
 
-    return (failed > 0 || errors > 0 || xpassed > 0) ? 1 : 0;
+    return (failed > 0 || errors > 0 || xpassed > 0 ||
+            rt_failed > 0 || rt_xpassed > 0) ? 1 : 0;
 }

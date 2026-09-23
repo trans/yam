@@ -101,6 +101,10 @@ static void test_flow_keys(void) {
           "[ { [ a ] b } { { c d } e } { [ [ f ] ] g } ]");
     check("[ x, [y] ]", "[ x [ y ] ]");
     check("k: [a, {b: c}]", "{ k [ a { b c } ] }");
+    /* a flow key after the first entry is a key of the same mapping */
+    check("k: v\n[c, d]: [e]\n", "{ k v [ c d ] [ e ] }");
+    check("k: v\n{c: d}: e\n", "{ k v { c d } e }");
+    check("k: v\n&a [c]: [e]\nz: 1\n", "{ k v &a [ c ] [ e ] z 1 }");
 }
 
 /* Plain scalars containing quote or comment characters must not confuse
@@ -125,7 +129,27 @@ static void test_flow_empty_props(void) {
     check("[&a ]", "[ &a ~ ]");
     check("[&a x: y]", "[ { &a x y } ]");
     check("{a: &b , c: d}", "{ a &b ~ c d }");
+    /* props on an empty value, then a sibling entry with props */
+    check("k: &a\n&b x: y\n", "{ k &a ~ &b x y }");
+    check("a: b\n&k : v\n", "{ a b &k ~ v }");
+    /* mapping props, then a key with its own props, then more keys */
+    check("&r\n&s a: b\nc: d\n", "&r { &s a b c d }");
+    check("a: ? b\n", "{ a ERR");            /* '?' on an implicit key's line */
+    check("? []\n[]\n", "{ [ ] ~ ERR");       /* flow key without ':' */
+    /* a key at the mapping's indentation ends an empty value */
+    check("a:\n*b : c\n", "{ a ~ *b c }");
+    check("a:\n[x]: y\n", "{ a ~ [ x ] y }");
+    check("?\n  []:\n:\n", "{ { [ ] ~ } ~ }");
+    /* '?' followed by nothing indented: an empty key */
+    check("?\n?\n", "{ ~ ~ ~ ~ }");
+    check("?\n- a\n", "{ [ a ] ~ }");   /* zero-indented sequence as key */
+    /* props on a block mapping, then an empty key with its own props */
+    check("&m\n&k : v\nb: c\n", "&m { &k ~ v b c }");
     check("[&a &b x]", "[ ERR");
+    check("!<", "ERR");            /* unterminated verbatim tag */
+    check("&a\n*b\n", "ERR");      /* anchor on an alias, next line */
+    check("[&a\n *b]", "[ ERR");    /* same, in flow */
+    check("!<> x", "ERR");         /* empty verbatim tag */
 }
 
 /* ── JSON-style input ──────────────────────────────────────── */

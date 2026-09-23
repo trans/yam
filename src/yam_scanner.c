@@ -868,10 +868,15 @@ static yam_status scan_tag(yam_scanner *s, yam_token *tok) {
     if (PEEK(s) == '!') {
         advance(s, 1); /* !! secondary tag */
     } else if (PEEK(s) == '<') {
-        /* verbatim tag !<...> */
+        /* verbatim tag !<...>: at least one character, no whitespace,
+         * closed by '>' */
         advance(s, 1);
-        while (!AT_END(s) && PEEK(s) != '>') advance(s, 1);
-        if (PEEK(s) == '>') advance(s, 1);
+        size_t uri_start = s->pos;
+        while (!AT_END(s) && PEEK(s) != '>' && !yam_is_blank_or_break(PEEK(s)))
+            advance(s, 1);
+        if (PEEK(s) != '>' || s->pos == uri_start)
+            SCAN_ERROR(s, "invalid verbatim tag");
+        advance(s, 1);
         size_t len = BUF_AT(s) - tag_start;
         s->last_token_col = (int)start.col - 1;
         *tok = (yam_token){
@@ -1138,6 +1143,9 @@ yam_status yam_scan_token(yam_scanner *s, yam_token *tok) {
     if (c == '?' && s->flow_level == 0) {
         uint8_t next = PEEK_AT(s, 1);
         if (yam_is_blank_or_break(next) || next == 0) {
+            /* "key: ? x" — a block mapping can't start on a key's line */
+            if (s->key_colon_line == s->line)
+                SCAN_ERROR(s, "mapping values are not allowed on the same line as another key");
             if (tab_after_indicator(s, s->pos))
                 SCAN_ERROR(s, "tabs are not allowed before a nested block collection");
             int qcol = (int)s->col - 1;

@@ -229,6 +229,18 @@ static inline bool enqueue(yam_parser *p, const yam_event *evt) {
     return true;
 }
 
+/* Insert an event at index `idx` of the eager event list (e.g. a
+ * MAPPING_START before a key that turned out to start an implicit
+ * mapping). Like enqueue, applies the schema's default tags. */
+static bool insert_event(yam_parser *p, int idx, const yam_event *evt) {
+    if (!enqueue(p, evt)) return false;
+    yam_event tagged = p->events[p->evt_len - 1];
+    memmove(&p->events[idx + 1], &p->events[idx],
+            (size_t)(p->evt_len - 1 - idx) * sizeof(yam_event));
+    p->events[idx] = tagged;
+    return true;
+}
+
 static inline bool dequeue(yam_parser *p, yam_event *evt) {
     if (p->evt_cursor >= p->evt_len) return false;
     *evt = p->events[p->evt_cursor++];
@@ -298,7 +310,14 @@ static inline int tok_col(yam_parser *p) {
 
 /* ── Context helpers ─────────────────────────────────────── */
 
+/* Inside a flow collection? The incremental parser tracks nesting in its
+ * frame stack, the eager parser in its context stack. */
 static inline bool in_flow(yam_parser *p) {
+    if (p->incremental) {
+        if (p->frame_len == 0) return false;
+        ctx_type t = p->frames[p->frame_len - 1].type;
+        return t == CTX_FLOW_MAP || t == CTX_FLOW_SEQ;
+    }
     ctx_entry *top = top_ctx(p);
     return top && (top->type == CTX_FLOW_MAP || top->type == CTX_FLOW_SEQ);
 }
@@ -521,7 +540,7 @@ static yam_status consume_props(yam_parser *p) {
     /* properties directly before an alias would apply to it (on a later
      * line they belong to a block collection whose first key is the alias) */
     if ((p->has_anchor || p->has_tag) && tok_type(p) == YAM_TOK_ALIAS &&
-        p->current.start.line == p->props_line)
+        (p->current.start.line == p->props_line || in_flow(p)))
         PARSE_ERROR(p, "an alias cannot have an anchor or tag");
     return YAM_OK;
 }
@@ -633,12 +652,7 @@ static yam_status parse_flow_sequence(yam_parser *p) {
                 placeholder.flow = true;
                 placeholder.start = p->events[key_idx].start;
                 placeholder.end = p->events[key_idx].start;
-                if (!enqueue(p, &placeholder)) return OOM_STATUS(p);
-                /* shift key events right to make room for mapping start */
-                memmove(&p->events[key_idx + 1],
-                        &p->events[key_idx],
-                        num_key_events * sizeof(yam_event));
-                p->events[key_idx] = placeholder;
+                if (!insert_event(p, key_idx, &placeholder)) return OOM_STATUS(p);
             }
 
             consume_token(p); /* consume : */
@@ -866,17 +880,12 @@ static yam_status parse_block_map_value(yam_parser *p, int map_indent) {
         return YAM_OK;
     }
 
-    /* next key at same indent → empty value */
-    if (col == map_indent && (tt == YAM_TOK_SCALAR || tt == YAM_TOK_ANCHOR ||
-        tt == YAM_TOK_TAG || tt == YAM_TOK_BLOCK_MAP_KEY ||
-        tt == YAM_TOK_BLOCK_MAP_VALUE)) {
-        emit_empty(p);
-        return YAM_OK;
-    }
-
-    /* seq entry at lesser indent than map → empty value.
-     * At same indent → valid value (YAML allows sequences at key indent). */
-    if (tt == YAM_TOK_BLOCK_SEQ_ENTRY && col < map_indent) {
+    /* Anything left of the mapping's indentation ends it, and anything at
+     * its indentation is the next entry: the value is empty. The one
+     * exception is a block sequence, which may sit at the key's
+     * indentation ("k:\n- a"). */
+    if (col < map_indent ||
+        (col == map_indent && tt != YAM_TOK_BLOCK_SEQ_ENTRY)) {
         emit_empty(p);
         return YAM_OK;
     }
@@ -906,8 +915,14 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
             st = peek_token(p);
             if (st != YAM_OK) return st;
 
-            if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE &&
-                tok_col(p) == map_indent) {
+            /* nothing indented past the '?' (e.g. ':' or another '?' at
+             * the mapping's indentation, or the end of the document):
+             * the key is empty. A block sequence may sit at the mapping's
+             * indentation ("?\n- a"). */
+            if (tok_col(p) < map_indent ||
+                (tok_col(p) == map_indent && tok_type(p) != YAM_TOK_BLOCK_SEQ_ENTRY) ||
+                tok_type(p) == YAM_TOK_DOC_START || tok_type(p) == YAM_TOK_DOC_END ||
+                tok_type(p) == YAM_TOK_STREAM_END) {
                 emit_empty(p);
             } else if (tok_type(p) == YAM_TOK_ANCHOR ||
                        tok_type(p) == YAM_TOK_TAG) {
@@ -964,6 +979,15 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
 
         /* key matches map indent if either the props or scalar is at map_indent */
         bool at_map_indent = (col == map_indent) || (key_start_col == map_indent);
+
+        /* props on an empty key ("!!null : v") */
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE && key_start_col == map_indent &&
+            (p->has_anchor || p->has_tag)) {
+            emit_empty(p);
+            st = parse_block_map_value(p, map_indent);
+            if (st != YAM_OK) return st;
+            continue;
+        }
         if (tt == YAM_TOK_SCALAR && at_map_indent) {
             yam_event evt = evt_simple(YAM_EVT_SCALAR);
             evt.value = p->current.value;
@@ -1010,10 +1034,11 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
             PARSE_ERROR(p, "could not find expected ':' after mapping key");
         }
 
-        /* flow collection as key */
+        /* flow collection as key: parse just the collection (a block node
+         * would treat "[...]:" as the start of a new, nested mapping) */
         if ((tt == YAM_TOK_FLOW_SEQ_START || tt == YAM_TOK_FLOW_MAP_START) &&
-            col == map_indent) {
-            st = parse_block_node(p);
+            at_map_indent) {
+            st = parse_flow_node(p);
             if (st != YAM_OK) return st;
 
             st = peek_token(p);
@@ -1024,7 +1049,7 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
                 if (st != YAM_OK) return st;
                 continue;
             }
-            break;
+            PARSE_ERROR(p, "could not find expected ':' after mapping key");
         }
 
         break;
@@ -1091,6 +1116,21 @@ static yam_status parse_block_node(yam_parser *p) {
         p->current.start.line == p->props_line)
         PARSE_ERROR(p, "block sequence cannot start on the same line as its properties");
 
+    /* A new line that is not indented past the enclosing block collection
+     * starts its next entry ("k: !!null\n!!str x: y", "? a: &x\n: b"):
+     * our props belong to an empty node. A block sequence may still sit
+     * at a mapping's indentation ("k: &a\n- x" anchors the sequence). */
+    if ((p->has_anchor || p->has_tag) && !in_flow(p) &&
+        p->current.start.line != p->props_line) {
+        ctx_entry *parent = top_ctx(p);
+        if (parent && (col < parent->indent ||
+                       (col == parent->indent &&
+                        !(tt == YAM_TOK_BLOCK_SEQ_ENTRY && parent->type == CTX_BLOCK_MAP)))) {
+            emit_empty(p);
+            return YAM_OK;
+        }
+    }
+
     /* If next token is ANCHOR/TAG, these are props for an inner node.
      * Save our props (for the outer collection) and let the inner
      * node's props be consumed when we recurse into parsing. */
@@ -1108,6 +1148,8 @@ static yam_status parse_block_node(yam_parser *p) {
         p->pending_tag = YAM_STR_NULL;
 
         /* Consume inner node's props to peek at the real structure */
+        int inner_col = tok_col(p);   /* where the inner node (a key?) starts */
+        size_t inner_line = p->current.start.line;
         st = consume_props(p);
         if (st != YAM_OK) return st;
 
@@ -1140,7 +1182,9 @@ static yam_status parse_block_node(yam_parser *p) {
             if (inner_has_anchor) evt.anchor = inner_anchor;
             if (inner_has_tag) evt.tag = inner_tag;
 
-            int scalar_col = col;
+            /* the key starts at its props when they share its line
+             * ("&k a: b" is a key at the column of "&k") */
+            int scalar_col = evt.start.line == inner_line ? inner_col : col;
             consume_token(p);
 
             st = peek_token(p);
@@ -1195,6 +1239,37 @@ static yam_status parse_block_node(yam_parser *p) {
             if (st != YAM_OK) return st;
             {
                 yam_event end_evt = evt_simple(YAM_EVT_SEQUENCE_END);
+                end_evt.start = p->current.start;
+                end_evt.end = p->current.start;
+                enqueue(p, &end_evt);
+            }
+            pop_ctx(p);
+            return YAM_OK;
+        }
+
+        /* Empty key with its own props ("!!map\n!!null : v"): outer props
+         * go on the mapping, inner props on the empty key */
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE && !in_flow(p)) {
+            yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
+            map_evt.start = p->current.start;
+            map_evt.end = p->current.start;
+            attach_props(p, &map_evt); /* outer anchor/tag */
+            enqueue(p, &map_evt);
+            push_ctx(p, CTX_BLOCK_MAP, inner_col);
+
+            yam_event key = evt_simple(YAM_EVT_SCALAR);
+            key.start = p->current.start;
+            key.end = p->current.start;
+            if (inner_has_anchor) key.anchor = inner_anchor;
+            if (inner_has_tag) key.tag = inner_tag;
+            enqueue(p, &key);
+
+            st = parse_block_map_value(p, inner_col);
+            if (st != YAM_OK) return st;
+            st = parse_block_mapping(p, inner_col);
+            if (st != YAM_OK) return st;
+            {
+                yam_event end_evt = evt_simple(YAM_EVT_MAPPING_END);
                 end_evt.start = p->current.start;
                 end_evt.end = p->current.start;
                 enqueue(p, &end_evt);
@@ -1322,7 +1397,9 @@ static yam_status parse_block_node(yam_parser *p) {
             return YAM_OK;
         }
 
-        attach_props(p, &evt);
+        /* an alias node itself can't have an anchor or tag */
+        if (p->has_anchor || p->has_tag)
+            PARSE_ERROR(p, "an alias cannot have an anchor or tag");
         enqueue(p, &evt);
         return YAM_OK;
     }
@@ -1359,11 +1436,7 @@ static yam_status parse_block_node(yam_parser *p) {
             yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
             map_evt.start = p->events[saved_evt_len].start;
             map_evt.end = p->events[saved_evt_len].start;
-            if (!enqueue(p, &map_evt)) return OOM_STATUS(p);
-            memmove(&p->events[saved_evt_len + 1],
-                    &p->events[saved_evt_len],
-                    (p->evt_len - saved_evt_len - 1) * sizeof(yam_event));
-            p->events[saved_evt_len] = map_evt;
+            if (!insert_event(p, saved_evt_len, &map_evt)) return OOM_STATUS(p);
             push_ctx(p, CTX_BLOCK_MAP, flow_col);
             st = parse_block_map_value(p, flow_col);
             if (st != YAM_OK) return st;
@@ -1410,11 +1483,7 @@ static yam_status parse_block_node(yam_parser *p) {
             yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
             map_evt.start = p->events[saved_evt_len].start;
             map_evt.end = p->events[saved_evt_len].start;
-            if (!enqueue(p, &map_evt)) return OOM_STATUS(p);
-            memmove(&p->events[saved_evt_len + 1],
-                    &p->events[saved_evt_len],
-                    (p->evt_len - saved_evt_len - 1) * sizeof(yam_event));
-            p->events[saved_evt_len] = map_evt;
+            if (!insert_event(p, saved_evt_len, &map_evt)) return OOM_STATUS(p);
             push_ctx(p, CTX_BLOCK_MAP, flow_col);
             st = parse_block_map_value(p, flow_col);
             if (st != YAM_OK) return st;
@@ -3776,8 +3845,11 @@ static yam_status parser_step(yam_parser *p) {
         top = inc_top_frame(p);
         int ek_indent = top ? top->indent : 0;
 
-        if (tt == YAM_TOK_BLOCK_MAP_VALUE && tok_col(p) == ek_indent) {
-            /* empty key (: at map indent) */
+        if (tok_col(p) < ek_indent ||
+            (tok_col(p) == ek_indent && tt != YAM_TOK_BLOCK_SEQ_ENTRY) ||
+            tt == YAM_TOK_DOC_START || tt == YAM_TOK_DOC_END || tt == YAM_TOK_STREAM_END) {
+            /* nothing indented past the '?' (a block sequence may sit at
+             * the mapping's indentation): empty key */
             evt = evt_simple(YAM_EVT_SCALAR);
             evt.implicit = true;
             evt.start = p->current.start;
@@ -3895,10 +3967,9 @@ static yam_status parser_step(yam_parser *p) {
             p->state = ST_BLOCK_MAP_LOOP;
             return YAM_OK;
         }
-        /* next key/value/scalar/anchor/tag at map indent → empty value */
-        if (col == map_indent && (tt == YAM_TOK_SCALAR ||
-            tt == YAM_TOK_ANCHOR || tt == YAM_TOK_TAG ||
-            tt == YAM_TOK_BLOCK_MAP_KEY || tt == YAM_TOK_BLOCK_MAP_VALUE)) {
+        /* anything else at the map's indentation is the next entry (only a
+         * block sequence may sit there as the value) → empty value */
+        if (col == map_indent && tt != YAM_TOK_BLOCK_SEQ_ENTRY) {
             evt = evt_simple(YAM_EVT_SCALAR);
             evt.implicit = true;
             evt.start = p->current.start;

@@ -27,6 +27,7 @@ typedef struct {
     int           indent;     /* absolute column for this level */
     int           count;      /* entries emitted so far */
     bool          expect_key; /* in mappings: true=key, false=value */
+    bool          complex_key; /* block mapping: current key used "? " */
 } emit_ctx;
 
 /* ── Emitter state ───────────────────────────────────────── */
@@ -56,6 +57,8 @@ struct yam_emitter {
     bool first_doc;
     bool wrote_block_key; /* just wrote a block map key, value next */
     bool after_seq_dash;  /* just wrote "- " for a block seq entry */
+    bool key_was_alias;   /* the current mapping key is an alias */
+    bool wrote_props;     /* the current node has an anchor or tag */
 };
 
 /* ── Buffer management ───────────────────────────────────── */
@@ -242,9 +245,17 @@ static bool needs_escape(const char *s, size_t len) {
 static bool needs_quoting(const char *s, size_t len, bool flow_ctx) {
     if (len == 0) return true;
 
-    /* starts with indicator */
+    /* starts with an indicator. '-', '?' and ':' may start a plain scalar
+     * when followed by a "safe" character: not a blank, and in flow
+     * context not a flow indicator ("-123", "?x", ":x", "-foo") */
     uint8_t first = (uint8_t)s[0];
-    if (yam_is_indicator(first)) return true;
+    if (yam_is_indicator(first)) {
+        if (!(first == '-' || first == '?' || first == ':')) return true;
+        if (len < 2) return true;
+        uint8_t next = (uint8_t)s[1];
+        if (yam_is_blank_or_break(next)) return true;
+        if (flow_ctx && yam_is_flow(next)) return true;
+    }
     /* space or tab at start */
     if (first == ' ' || first == '\t') return true;
 
@@ -254,9 +265,10 @@ static bool needs_quoting(const char *s, size_t len, bool flow_ctx) {
 
     for (size_t i = 0; i < len; i++) {
         uint8_t c = (uint8_t)s[i];
-        /* ": " or " #" */
-        if (c == ':' && i + 1 < len && s[i + 1] == ' ') return true;
-        if (c == ' ' && i + 1 < len && s[i + 1] == '#') return true;
+        /* ": ", ":\t", " #", "\t#", and a trailing ':' (which would read
+         * as a mapping value indicator) */
+        if (c == ':' && (i + 1 == len || s[i + 1] == ' ' || s[i + 1] == '\t')) return true;
+        if ((c == ' ' || c == '\t') && i + 1 < len && s[i + 1] == '#') return true;
         /* line breaks */
         if (yam_is_break(c)) return true;
         /* flow indicators in flow context */
@@ -265,6 +277,20 @@ static bool needs_quoting(const char *s, size_t len, bool flow_ctx) {
         if ((c == ' ' || c == '\t') && i + 1 == len) return true;
     }
     return false;
+}
+
+/* Can `s` be written as a literal block scalar and read back exactly?
+ * Not with control characters (other than tab and line feed), and not
+ * when the first non-empty line starts with a space: that would need an
+ * indentation indicator. */
+static bool literal_ok(const char *s, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        uint8_t c = (uint8_t)s[i];
+        if ((c < 0x20 && c != '\n' && c != '\t') || c == 0x7F) return false;
+    }
+    size_t i = 0;
+    while (i < len && s[i] == '\n') i++;
+    return !(i < len && s[i] == ' ');
 }
 
 static bool is_str_tag(yam_str tag) {
@@ -278,13 +304,16 @@ static bool is_str_tag(yam_str tag) {
  * another type (number, bool, null) is quoted to keep it a string. */
 static yam_scalar_style choose_style(yam_scalar_style requested,
                                      const char *val, size_t len,
-                                     bool flow_ctx, yam_str tag) {
-    /* literal/folded only in block context */
-    if (requested == YAM_SCALAR_LITERAL || requested == YAM_SCALAR_FOLDED) {
-        if (flow_ctx) return YAM_SCALAR_DOUBLE_QUOTED;
-        return requested;
-    }
-    if (requested == YAM_SCALAR_SINGLE_QUOTED) return requested;
+                                     bool flow_ctx, bool is_key, yam_str tag) {
+    /* Block scalars are written literal (folded values are already
+     * folded, and literal keeps them exact), only in block context and
+     * not as keys; otherwise double-quoted */
+    bool block_ok = !flow_ctx && !is_key && literal_ok(val, len);
+    if (requested == YAM_SCALAR_LITERAL || requested == YAM_SCALAR_FOLDED)
+        return block_ok ? YAM_SCALAR_LITERAL : YAM_SCALAR_DOUBLE_QUOTED;
+    /* single quotes fold line breaks; keep the value exact with escapes */
+    if (requested == YAM_SCALAR_SINGLE_QUOTED)
+        return has_break(val, len) ? YAM_SCALAR_DOUBLE_QUOTED : requested;
     if (requested == YAM_SCALAR_DOUBLE_QUOTED) return requested;
 
     /* PLAIN requested — auto-detect */
@@ -301,7 +330,7 @@ static yam_scalar_style choose_style(yam_scalar_style requested,
         return YAM_SCALAR_DOUBLE_QUOTED;
 
     /* multiline in block context → literal */
-    if (!flow_ctx && has_break(val, len))
+    if (block_ok && has_break(val, len))
         return YAM_SCALAR_LITERAL;
 
     return YAM_SCALAR_DOUBLE_QUOTED;
@@ -357,59 +386,44 @@ static yam_status emit_double_quoted(yam_emitter *e, const char *s, size_t len) 
     return buf_put(e, '"');
 }
 
-static yam_status emit_block_scalar(yam_emitter *e, char indicator,
-                                    const char *s, size_t len, int indent) {
+/* Write `s` as a literal block scalar, which reads back exactly. Callers
+ * check literal_ok() first. Chomping follows the trailing line breaks:
+ * none "|-", one "|", more (or nothing but breaks) "|+". Empty lines are
+ * written without indentation. */
+static yam_status emit_block_scalar(yam_emitter *e, const char *s, size_t len,
+                                    int indent) {
     yam_status st;
+    size_t trail = 0;
+    while (trail < len && s[len - 1 - trail] == '\n') trail++;
+    size_t body = len - trail;
 
-    /* determine chomping */
-    char chomp = 0;
-    if (len == 0 || s[len - 1] != '\n') {
-        chomp = '-'; /* strip */
-    } else if (len >= 2 && s[len - 2] == '\n') {
-        chomp = '+'; /* keep */
-    }
-    /* else clip (default) */
-
-    /* check if first content line starts with space (needs indent indicator) */
-    bool needs_indent_indicator = (len > 0 && s[0] == ' ');
-
-    st = buf_put(e, indicator);
-    if (st != YAM_OK) return st;
-    if (chomp) {
-        st = buf_put(e, chomp);
-        if (st != YAM_OK) return st;
-    }
-    if (needs_indent_indicator) {
-        /* explicit indent = opts.indent */
-        char dig = '0' + (char)(e->opts.indent > 9 ? 9 : e->opts.indent);
-        st = buf_put(e, dig);
-        if (st != YAM_OK) return st;
-    }
-    st = buf_put(e, '\n');
+    const char *header = body == 0 ? (trail ? "|+\n" : "|-\n")
+                       : trail == 0 ? "|-\n" : trail == 1 ? "|\n" : "|+\n";
+    st = buf_puts(e, header, strlen(header));
     if (st != YAM_OK) return st;
 
-    /* emit each line with indentation */
+    /* body lines, each ending in a line break */
     size_t pos = 0;
-    while (pos < len) {
-        /* find end of line */
+    while (pos < body) {
         size_t eol = pos;
-        while (eol < len && s[eol] != '\n') eol++;
-
-        if (eol > pos || (eol < len && s[eol] == '\n')) {
+        while (eol < body && s[eol] != '\n') eol++;
+        if (eol > pos) {
             st = buf_indent(e, indent);
             if (st != YAM_OK) return st;
-            if (eol > pos) {
-                st = buf_puts(e, s + pos, eol - pos);
-                if (st != YAM_OK) return st;
-            }
-            st = buf_put(e, '\n');
+            st = buf_puts(e, s + pos, eol - pos);
             if (st != YAM_OK) return st;
         }
-
+        st = buf_put(e, '\n');
+        if (st != YAM_OK) return st;
         pos = eol + 1;
-        if (eol == len) break; /* no trailing newline */
     }
 
+    /* the first trailing break ended the last body line; kept extras are
+     * empty lines (all of them when there is no body) */
+    for (size_t i = body ? 1 : 0; i < trail; i++) {
+        st = buf_put(e, '\n');
+        if (st != YAM_OK) return st;
+    }
     return YAM_OK;
 }
 
@@ -418,19 +432,24 @@ static yam_status emit_scalar(yam_emitter *e, const yam_event *evt) {
     size_t vlen = evt->value.len;
     bool flow_ctx = in_any_flow(e) || e->opts.style != YAM_EMIT_BLOCK;
 
-    yam_scalar_style style = choose_style(evt->scalar_style, val, vlen, flow_ctx,
-                                          evt->tag);
-
     emit_ctx *ctx = top_ctx(e);
+    bool is_key = ctx && (ctx->type == EMIT_CTX_BLOCK_MAP || ctx->type == EMIT_CTX_FLOW_MAP) &&
+                  ctx->expect_key;
+    yam_scalar_style style = choose_style(evt->scalar_style, val, vlen, flow_ctx,
+                                          is_key, evt->tag);
+
     int indent = ctx ? ctx->indent + e->opts.indent : e->opts.indent;
 
     switch (style) {
     case YAM_SCALAR_PLAIN:
         if (vlen == 0) {
             /* empty node: nothing to write, except in a flow sequence
-             * where "[a, ]" would drop the entry, so write ~ (null) */
-            if (ctx && ctx->type == EMIT_CTX_FLOW_SEQ) return buf_put(e, '~');
-            if (e->len > 0 && e->buf[e->len - 1] == ' ') e->len--;
+             * where "[a, ]" would drop the entry, so write ~ (null). Keep
+             * the space after an anchor or tag ("&a : v", not "&a: v") */
+            if (ctx && ctx->type == EMIT_CTX_FLOW_SEQ && !e->wrote_props)
+                return buf_put(e, '~');
+            if (!e->wrote_props && !is_key && e->len > 0 && e->buf[e->len - 1] == ' ')
+                e->len--;
             return YAM_OK;
         }
         return emit_plain(e, val, vlen);
@@ -439,9 +458,8 @@ static yam_status emit_scalar(yam_emitter *e, const yam_event *evt) {
     case YAM_SCALAR_DOUBLE_QUOTED:
         return emit_double_quoted(e, val, vlen);
     case YAM_SCALAR_LITERAL:
-        return emit_block_scalar(e, '|', val, vlen, indent);
     case YAM_SCALAR_FOLDED:
-        return emit_block_scalar(e, '>', val, vlen, indent);
+        return emit_block_scalar(e, val, vlen, indent);
     }
     return YAM_ERR_EMIT;
 }
@@ -481,6 +499,7 @@ static yam_status emit_tag(yam_emitter *e, yam_str tag) {
 }
 
 static yam_status emit_props(yam_emitter *e, const yam_event *evt) {
+    e->wrote_props = (evt->anchor.data && evt->anchor.len) || (evt->tag.data && evt->tag.len);
     yam_status st = emit_anchor(e, evt->anchor);
     if (st != YAM_OK) return st;
     return emit_tag(e, evt->tag);
@@ -507,6 +526,23 @@ static yam_status emit_block_collection_props(yam_emitter *e, const yam_event *e
     return YAM_OK;
 }
 
+/* A block collection as a mapping key must use the explicit form:
+ *   ? <props>
+ *     <collection>
+ *   : <value>
+ * Writes "?" and the key's properties; the collection follows on the next
+ * lines, and the value's ':' goes on its own line (see emit_pre_node). */
+static yam_status emit_complex_key_open(yam_emitter *e, emit_ctx *map,
+                                        const yam_event *evt) {
+    yam_status st = buf_put(e, '?');
+    if (st != YAM_OK) return st;
+    st = emit_block_collection_props(e, evt, true);
+    if (st != YAM_OK) return st;
+    map->complex_key = true;
+    e->after_seq_dash = false;
+    return YAM_OK;
+}
+
 /* ── Pre-node prefix ─────────────────────────────────────── */
 
 static yam_status emit_pre_node(yam_emitter *e, bool is_collection) {
@@ -528,7 +564,7 @@ static yam_status emit_pre_node(yam_emitter *e, bool is_collection) {
             /* newline + indent before key (skip for first key after "- " or at doc start) */
             if (e->after_seq_dash) {
                 /* compact mapping in sequence: first key shares "- " line */
-            } else if (ctx->count > 0 || (e->len > 0 && e->buf[e->len - 1] != '\n')) {
+            } else if (e->len > 0 && e->buf[e->len - 1] != '\n') {
                 st = buf_put(e, '\n');
                 if (st != YAM_OK) return st;
                 st = buf_indent(e, ctx->indent);
@@ -539,8 +575,26 @@ static yam_status emit_pre_node(yam_emitter *e, bool is_collection) {
                 if (st != YAM_OK) return st;
             }
         } else {
+            /* after an explicit "? key", the value indicator starts its own
+             * line at the mapping's indentation */
+            if (ctx->complex_key) {
+                if (e->len > 0 && e->buf[e->len - 1] != '\n') {
+                    st = buf_put(e, '\n');
+                    if (st != YAM_OK) return st;
+                }
+                st = buf_indent(e, ctx->indent);
+                if (st != YAM_OK) return st;
+                ctx->complex_key = false;
+            }
             /* ":" before a block collection value (its properties and the
              * line break follow, see block_collection_open); ": " otherwise */
+            /* after an alias key, ':' needs a space: it could otherwise be
+             * read as part of the alias name ("*a : v") */
+            if (e->key_was_alias) {
+                st = buf_put(e, ' ');
+                if (st != YAM_OK) return st;
+                e->key_was_alias = false;
+            }
             if (is_collection) {
                 st = PUTS(e, ":");
                 if (st != YAM_OK) return st;
@@ -553,8 +607,9 @@ static yam_status emit_pre_node(yam_emitter *e, bool is_collection) {
         break;
 
     case EMIT_CTX_BLOCK_SEQ:
-        /* newline + indent + "- " */
-        if (e->len > 0) {
+        /* newline + indent + "- " (no newline when already at a line
+         * start, e.g. after a block scalar, which ends with one) */
+        if (e->len > 0 && e->buf[e->len - 1] != '\n') {
             st = buf_put(e, '\n');
             if (st != YAM_OK) return st;
         }
@@ -572,6 +627,11 @@ static yam_status emit_pre_node(yam_emitter *e, bool is_collection) {
                 if (st != YAM_OK) return st;
             }
         } else {
+            if (e->key_was_alias) {
+                st = buf_put(e, ' ');
+                if (st != YAM_OK) return st;
+                e->key_was_alias = false;
+            }
             st = buf_puts(e, kv_sep(e), (size_t)kv_sep_len(e));
             if (st != YAM_OK) return st;
         }
@@ -659,7 +719,9 @@ yam_status yam_emit(yam_emitter *e, const yam_event *evt) {
         st = emit_pre_node(e, !use_flow);
         if (st != YAM_OK) return st;
 
-        if (use_flow) {
+        if (!use_flow && outer && outer->type == EMIT_CTX_BLOCK_MAP && outer->expect_key) {
+            st = emit_complex_key_open(e, outer, evt);
+        } else if (use_flow) {
             st = emit_props(e, evt);
         } else {
             st = emit_block_collection_props(e, evt, map_value);
@@ -710,6 +772,7 @@ yam_status yam_emit(yam_emitter *e, const yam_event *evt) {
             if (st != YAM_OK) return st;
         }
         pop_ctx(e);
+        e->after_seq_dash = false;
         return YAM_OK;
     }
 
@@ -722,8 +785,11 @@ yam_status yam_emit(yam_emitter *e, const yam_event *evt) {
         st = emit_pre_node(e, !use_flow);
         if (st != YAM_OK) return st;
 
-        st = use_flow ? emit_props(e, evt)
-                      : emit_block_collection_props(e, evt, map_value);
+        if (!use_flow && outer && outer->type == EMIT_CTX_BLOCK_MAP && outer->expect_key)
+            st = emit_complex_key_open(e, outer, evt);
+        else
+            st = use_flow ? emit_props(e, evt)
+                          : emit_block_collection_props(e, evt, map_value);
         if (st != YAM_OK) return st;
 
         if (use_flow) {
@@ -765,6 +831,7 @@ yam_status yam_emit(yam_emitter *e, const yam_event *evt) {
             if (st != YAM_OK) return st;
         }
         pop_ctx(e);
+        e->after_seq_dash = false;
         return YAM_OK;
     }
 
@@ -785,6 +852,11 @@ yam_status yam_emit(yam_emitter *e, const yam_event *evt) {
     case YAM_EVT_ALIAS: {
         st = emit_pre_node(e, false);
         if (st != YAM_OK) return st;
+        {
+            emit_ctx *ctx = top_ctx(e);
+            e->key_was_alias = ctx && (ctx->type == EMIT_CTX_BLOCK_MAP ||
+                                       ctx->type == EMIT_CTX_FLOW_MAP) && ctx->expect_key;
+        }
 
         st = buf_put(e, '*');
         if (st != YAM_OK) return st;
