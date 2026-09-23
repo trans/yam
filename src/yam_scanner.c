@@ -10,9 +10,9 @@
  *   - Flow level counter for context switching
  */
 
-#include "yam/yam.h"
-#include "yam/yam_chars.h"
-#include "yam/yam_simd.h"
+#include "yam_internal.h"
+#include "yam_chars.h"
+#include "yam_simd.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -77,6 +77,9 @@ struct yam_scanner {
     /* error context */
     char      error_msg[256];
     yam_mark  error_mark;
+
+    /* token handed out by the public yam_scan_next() */
+    yam_token out_tok;
 };
 
 /* For small helpers on the per-token path that GCC may otherwise decline
@@ -987,7 +990,13 @@ yam_scanner *yam_scanner_new(const char *input, size_t len, yam_arena *a) {
 }
 
 
-yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
+yam_status yam_scan_next(yam_scanner *s, const yam_token **tok) {
+    yam_status st = yam_scan_token(s, &s->out_tok);
+    *tok = st == YAM_OK ? &s->out_tok : NULL;
+    return st;
+}
+
+yam_status yam_scan_token(yam_scanner *s, yam_token *tok) {
     /* drain pending tokens first */
     if (s->pending_count > 0) {
         *tok = s->pending[0];

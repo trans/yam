@@ -68,10 +68,10 @@ static double bench_yam(const char *input, size_t len, int *token_count) {
     yam_arena *a = yam_arena_new(1 << 20); /* 1MB arena */
     yam_scanner *s = yam_scanner_new(input, len, a);
 
-    yam_token tok;
+    const yam_token *tok;
     int count = 0;
     while (yam_scan_next(s, &tok) == YAM_OK) {
-        if (tok.type == YAM_TOK_STREAM_END || tok.type == YAM_TOK_NONE) break;
+        if (tok->type == YAM_TOK_STREAM_END || tok->type == YAM_TOK_NONE) break;
         count++;
     }
 

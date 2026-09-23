@@ -459,9 +459,9 @@ make bench        # scanner benchmark on your machine</code></pre>
       <div class="grid-2">
         <article class="tile">
           <h3>Event Loop</h3>
-          <pre class="terminal"><code>yam_event evt;
+          <pre class="terminal"><code>const yam_event *evt;
 while (yam_parse_next(parser, &evt) == YAM_OK) {
-  if (evt.type == YAM_EVT_STREAM_END) break;
+  if (evt->type == YAM_EVT_STREAM_END) break;
   /* consume event */
 }</code></pre>
         </article>
@@ -470,7 +470,7 @@ while (yam_parse_next(parser, &evt) == YAM_OK) {
           <pre class="terminal"><code>if (yam_parse_next(parser, &evt) != YAM_OK) {
   const char *msg = yam_parser_error(parser);
   yam_mark mark = yam_parser_error_mark(parser);
-  printf("%d:%d: %s\n", mark.line, mark.col, msg);
+  printf("%zu:%zu: %s\n", mark.line, mark.col, msg);
 }</code></pre>
         </article>
       </div>

@@ -7,8 +7,8 @@
  *   - MINIMAL: compact flow, no optional whitespace
  */
 
-#include "yam/yam.h"
-#include "yam/yam_chars.h"
+#include "yam_internal.h"
+#include "yam_chars.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -31,8 +31,13 @@ typedef struct {
 
 /* ── Emitter state ───────────────────────────────────────── */
 
+typedef struct {
+    yam_emit_style style;
+    int            indent;   /* spaces per level, 1-10 */
+} emit_opts;
+
 struct yam_emitter {
-    yam_emit_opts opts;
+    emit_opts     opts;
     yam_arena    *arena;
 
     /* output buffer (malloc'd) */
@@ -797,14 +802,12 @@ yam_status yam_emit(yam_emitter *e, const yam_event *evt) {
 
 /* ── Constructor / destructor ────────────────────────────── */
 
-yam_emitter *yam_emitter_new(yam_emit_opts opts, yam_arena *a) {
+yam_emitter *yam_emitter_new(yam_arena *a) {
     yam_emitter *e = malloc(sizeof(*e));
     if (!e) return NULL;
     memset(e, 0, sizeof(*e));
 
-    e->opts = opts;
-    if (e->opts.indent < 1) e->opts.indent = 2;
-    if (e->opts.indent > 10) e->opts.indent = 10;
+    e->opts = (emit_opts){ YAM_EMIT_BLOCK, 2 };
     e->arena = a;
 
     e->cap = EMIT_INIT_CAP;
@@ -817,6 +820,73 @@ yam_emitter *yam_emitter_new(yam_emit_opts opts, yam_arena *a) {
 
     e->first_doc = true;
     return e;
+}
+
+void yam_emitter_set_style(yam_emitter *e, yam_emit_style style) {
+    if (style == YAM_EMIT_BLOCK || style == YAM_EMIT_FLOW || style == YAM_EMIT_MINIMAL)
+        e->opts.style = style;
+}
+
+void yam_emitter_set_indent(yam_emitter *e, int indent) {
+    if (indent < 1) indent = 1;
+    if (indent > 10) indent = 10;
+    e->opts.indent = indent;
+}
+
+/* ── Event constructors ──────────────────────────────────── */
+
+yam_status yam_emit_stream_start(yam_emitter *e) {
+    yam_event evt = { .type = YAM_EVT_STREAM_START };
+    return yam_emit(e, &evt);
+}
+
+yam_status yam_emit_stream_end(yam_emitter *e) {
+    yam_event evt = { .type = YAM_EVT_STREAM_END };
+    return yam_emit(e, &evt);
+}
+
+yam_status yam_emit_document_start(yam_emitter *e, bool implicit) {
+    yam_event evt = { .type = YAM_EVT_DOC_START, .implicit = implicit };
+    return yam_emit(e, &evt);
+}
+
+yam_status yam_emit_document_end(yam_emitter *e, bool implicit) {
+    yam_event evt = { .type = YAM_EVT_DOC_END, .implicit = implicit };
+    return yam_emit(e, &evt);
+}
+
+yam_status yam_emit_scalar(yam_emitter *e, yam_str value, yam_scalar_style style,
+                           yam_str anchor, yam_str tag) {
+    yam_event evt = { .type = YAM_EVT_SCALAR, .value = value, .scalar_style = style,
+                      .anchor = anchor, .tag = tag };
+    return yam_emit(e, &evt);
+}
+
+yam_status yam_emit_alias(yam_emitter *e, yam_str name) {
+    yam_event evt = { .type = YAM_EVT_ALIAS, .value = name };
+    return yam_emit(e, &evt);
+}
+
+yam_status yam_emit_mapping_start(yam_emitter *e, yam_str anchor, yam_str tag, bool flow) {
+    yam_event evt = { .type = YAM_EVT_MAPPING_START, .anchor = anchor, .tag = tag,
+                      .flow = flow };
+    return yam_emit(e, &evt);
+}
+
+yam_status yam_emit_mapping_end(yam_emitter *e) {
+    yam_event evt = { .type = YAM_EVT_MAPPING_END };
+    return yam_emit(e, &evt);
+}
+
+yam_status yam_emit_sequence_start(yam_emitter *e, yam_str anchor, yam_str tag, bool flow) {
+    yam_event evt = { .type = YAM_EVT_SEQUENCE_START, .anchor = anchor, .tag = tag,
+                      .flow = flow };
+    return yam_emit(e, &evt);
+}
+
+yam_status yam_emit_sequence_end(yam_emitter *e) {
+    yam_event evt = { .type = YAM_EVT_SEQUENCE_END };
+    return yam_emit(e, &evt);
 }
 
 yam_str yam_emitter_output(yam_emitter *e) {

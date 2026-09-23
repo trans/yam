@@ -34,21 +34,15 @@ static event_list parse_yaml(const char *yaml, bool merge) {
     yam_parser *p = yam_parser_new(yaml, strlen(yaml), a);
     if (merge) yam_parser_set_merge(p, true);
 
-    yam_event evt;
+    const yam_event *evt;
     while (el.len < 512 && yam_parse_next(p, &evt) == YAM_OK) {
-        el.events[el.len++] = evt;
-        if (evt.type == YAM_EVT_STREAM_END) break;
+        el.events[el.len++] = *evt;
+        if (evt->type == YAM_EVT_STREAM_END) break;
     }
 
     yam_parser_free(p);
     yam_arena_free(a);
     return el;
-}
-
-static bool has_event_type(const event_list *el, yam_event_type t) {
-    for (int i = 0; i < el->len; i++)
-        if (el->events[i].type == t) return true;
-    return false;
 }
 
 static bool has_scalar(const event_list *el, const char *val) {
@@ -81,18 +75,6 @@ static int find_key_value(const event_list *el, int start, const char *key) {
         }
     }
     return -1;
-}
-
-/* Count scalar events with a given value */
-static int count_scalar(const event_list *el, const char *val) {
-    size_t vlen = strlen(val);
-    int count = 0;
-    for (int i = 0; i < el->len; i++)
-        if (el->events[i].type == YAM_EVT_SCALAR &&
-            el->events[i].value.len == vlen &&
-            memcmp(el->events[i].value.data, val, vlen) == 0)
-            count++;
-    return count;
 }
 
 /* ── Test: Basic merge ───────────────────────────────────── */
@@ -312,10 +294,10 @@ static yam_status parse_status(const char *yaml) {
     yam_arena *a = yam_arena_new(4096);
     yam_parser *p = yam_parser_new(yaml, strlen(yaml), a);
     yam_parser_set_merge(p, true);
-    yam_event evt;
+    const yam_event *evt;
     yam_status st;
     while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
-           evt.type != YAM_EVT_STREAM_END && evt.type != YAM_EVT_NONE)
+           evt->type != YAM_EVT_STREAM_END && evt->type != YAM_EVT_NONE)
         ;
     yam_parser_free(p);
     yam_arena_free(a);

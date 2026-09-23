@@ -33,14 +33,14 @@ static void dump_tokens(const char *input) {
     yam_arena *a = yam_arena_new(4096);
     yam_scanner *s = yam_scanner_new(input, strlen(input), a);
 
-    yam_token tok;
-    while (yam_scan_next(s, &tok) == YAM_OK && tok.type != YAM_TOK_NONE) {
-        if (tok.type == YAM_TOK_STREAM_END) break;
-        printf("    %-20s", yam_token_type_str(tok.type));
-        if (tok.value.data && tok.value.len > 0) {
-            printf(" \"%.*s\"", (int)tok.value.len, tok.value.data);
+    const yam_token *tok;
+    while (yam_scan_next(s, &tok) == YAM_OK && tok->type != YAM_TOK_NONE) {
+        if (tok->type == YAM_TOK_STREAM_END) break;
+        printf("    %-20s", yam_token_type_str(tok->type));
+        if (tok->value.data && tok->value.len > 0) {
+            printf(" \"%.*s\"", (int)tok->value.len, tok->value.data);
         }
-        printf("  [%zu:%zu]\n", tok.start.line, tok.start.col);
+        printf("  [%zu:%zu]\n", tok->start.line, tok->start.col);
     }
 
     yam_scanner_free(s);
@@ -66,8 +66,10 @@ static int scan_all(const char *input, yam_token *out, int max_tokens) {
     int count = 0;
     yam_status st;
     while (count < max_tokens) {
-        st = yam_scan_next(s, &out[count]);
+        const yam_token *tok;
+        st = yam_scan_next(s, &tok);
         if (st != YAM_OK) break;
+        out[count] = *tok;
         if (out[count].type == YAM_TOK_NONE) break;
         count++;
         if (out[count-1].type == YAM_TOK_STREAM_END) break;
@@ -98,8 +100,10 @@ static int parse_all(const char *input, yam_event *out, int max_events) {
 
     int count = 0;
     while (count < max_events) {
-        yam_status st = yam_parse_next(p, &out[count]);
+        const yam_event *evt;
+        yam_status st = yam_parse_next(p, &evt);
         if (st != YAM_OK) break;
+        out[count] = *evt;
         if (out[count].type == YAM_EVT_STREAM_END) { count++; break; }
         count++;
     }

@@ -7,6 +7,13 @@ Memory is managed through arenas -- allocate an arena, pass it to
 constructors, and free it when done. No per-object cleanup needed except
 for the parser, scanner, and emitter handles themselves.
 
+**ABI stability.** Tokens and events are allocated only by the library and
+read through `const` pointers; schemas and emitter options are opaque and
+set through functions. New fields and options can therefore be added
+without breaking compiled programs. `yam_str` and `yam_mark` are plain
+value types that will not change. Only the functions declared in `yam.h`
+are exported from the shared library.
+
 ---
 
 ## Core Types
@@ -37,6 +44,7 @@ YAM_ERR_INPUT    // invalid input (NULL pointer, etc.)
 YAM_ERR_SCAN     // malformed YAML
 YAM_ERR_PARSE    // structural YAML error
 YAM_ERR_EMIT     // invalid event sequence
+YAM_ERR_LIMIT    // a safety limit was exceeded (events, depth, alias expansion)
 ```
 
 Returned by parser, scanner, and emitter functions. Use
@@ -53,6 +61,8 @@ typedef struct {
 ```
 
 ### yam_event
+
+Read-only; events are owned by the parser (see `yam_parse_next`).
 
 ```c
 typedef struct {
@@ -120,14 +130,14 @@ yam_arena  *a = yam_arena_new(4096);
 yam_parser *p = yam_parser_new(input, len, a);
 
 // configure before first yam_parse_next() call
-yam_parser_set_schema(p, &schema);    // optional: tag resolution
+yam_parser_set_schema(p, yam_schema_core()); // optional: tag resolution
 yam_parser_set_merge(p, true);        // optional: expand << merge keys
 yam_parser_set_resolve(p, true);      // optional: inline *alias expansion
 yam_parser_set_max_events(p, 50000);  // optional: raise event limit
 
-yam_event evt;
+const yam_event *evt;
 while (yam_parse_next(p, &evt) == YAM_OK) {
-    if (evt.type == YAM_EVT_STREAM_END) break;
+    if (evt->type == YAM_EVT_STREAM_END) break;
     // process evt...
 }
 
@@ -135,24 +145,31 @@ yam_parser_free(p);
 yam_arena_free(a);
 ```
 
-The full stream is parsed eagerly on the first `yam_parse_next()` call.
-Subsequent calls drain the internal event queue.
+`yam_parse_next` sets `evt` to an event owned by the parser, valid until the
+next call or `yam_parser_free`; on error it is set to NULL. The event's
+strings point into the input or the arena and outlive the event. After
+`STREAM_END`, further calls return `YAM_EVT_NONE` events.
+
+Events are produced incrementally as the input is consumed, except when
+merge keys, alias resolution, a schema, directives, or node properties
+require seeing the whole stream first.
 
 ### Functions
 
 | Function | Description |
 |----------|-------------|
 | `yam_parser *yam_parser_new(input, len, arena)` | Create parser. Input buffer must outlive parser. Returns NULL on alloc failure. |
-| `yam_status yam_parse_next(p, &evt)` | Get next event. |
-| `void yam_parser_set_schema(p, schema)` | Set tag schema for auto-resolution. |
-| `void yam_parser_set_merge(p, bool)` | Enable `<<` merge key expansion. |
-| `void yam_parser_set_resolve(p, bool)` | Enable `*alias` inline expansion. Cyclic aliases kept as ALIAS events. |
+| `yam_status yam_parse_next(p, const yam_event **evt)` | Get next event (owned by the parser). |
+| `void yam_parser_set_schema(p, schema)` | Set tag schema for auto-resolution. The schema must outlive the parser. |
+| `void yam_parser_set_merge(p, bool)` | Enable `<<` merge key expansion. The value must be a mapping, an alias to one, or a sequence of those. |
+| `void yam_parser_set_resolve(p, bool)` | Enable `*alias` inline expansion. An alias refers to the most recent preceding anchor in the same document; cyclic and unresolvable aliases are kept as ALIAS events. |
 | `void yam_parser_set_max_events(p, max)` | Set event limit (default 10,000; 0 = unlimited). |
+| `void yam_parser_set_max_depth(p, max)` | Set nesting depth limit (default 256; 0 = unlimited). |
 | `const char *yam_parser_error(p)` | Error message, or NULL. |
 | `yam_mark yam_parser_error_mark(p)` | Error source location. |
 | `void yam_parser_free(p)` | Free parser (not the arena). |
 
-### Event Limit
+### Safety Limits
 
 The default limit of 10,000 events handles roughly 3,000-5,000 YAML
 nodes (~100-200KB of dense YAML). Raise or disable it for larger files:
@@ -161,6 +178,10 @@ nodes (~100-200KB of dense YAML). Raise or disable it for larger files:
 yam_parser_set_max_events(p, 100000);  // large files
 yam_parser_set_max_events(p, 0);       // no limit
 ```
+
+Nesting is limited to 256 levels by default (`yam_parser_set_max_depth`),
+and alias/merge expansion is bounded by the event limit. Exceeding any
+limit returns `YAM_ERR_LIMIT`.
 
 ---
 
@@ -171,11 +192,19 @@ The emitter converts events back to YAML text.
 ### Lifecycle
 
 ```c
-yam_emit_opts opts = YAM_EMIT_OPTS_DEFAULT;  // block style, 2-space indent
-yam_emitter *e = yam_emitter_new(opts, arena);
+yam_emitter *e = yam_emitter_new(arena);     // block style, 2-space indent
+yam_emitter_set_style(e, YAM_EMIT_FLOW);     // optional
+yam_emitter_set_indent(e, 4);                // optional, 1-10
 
-// feed events (from parser or constructed manually)
-yam_emit(e, &evt);
+// re-emit parser events...
+yam_emit(e, evt);
+
+// ...or build the stream yourself
+yam_emit_stream_start(e);
+yam_emit_document_start(e, true);
+yam_emit_scalar(e, YAM_STR_LIT("hello"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_NULL);
+yam_emit_document_end(e, true);
+yam_emit_stream_end(e);
 
 yam_str output = yam_emitter_output(e);
 printf("%.*s", (int)output.len, output.data);
@@ -183,14 +212,11 @@ printf("%.*s", (int)output.len, output.data);
 yam_emitter_free(e);
 ```
 
-### Options
+Events must arrive in the order the parser produces them. Anchor and tag
+arguments may be `YAM_STR_NULL`; tags are full tags (`tag:yaml.org,2002:str`,
+written as `!!str`) or local tags (`!foo`).
 
-```c
-typedef struct {
-    yam_emit_style style;   // YAM_EMIT_BLOCK, YAM_EMIT_FLOW, YAM_EMIT_MINIMAL
-    int            indent;  // spaces per level (default 2)
-} yam_emit_opts;
-```
+### Styles
 
 | Style | Description |
 |-------|-------------|
@@ -202,8 +228,16 @@ typedef struct {
 
 | Function | Description |
 |----------|-------------|
-| `yam_emitter *yam_emitter_new(opts, arena)` | Create emitter. |
-| `yam_status yam_emit(e, &evt)` | Emit one event. |
+| `yam_emitter *yam_emitter_new(arena)` | Create emitter (block style, 2-space indent). |
+| `void yam_emitter_set_style(e, style)` | Set output style. |
+| `void yam_emitter_set_indent(e, n)` | Set spaces per indent level (1-10). |
+| `yam_status yam_emit(e, evt)` | Re-emit an event from `yam_parse_next`. |
+| `yam_emit_stream_start(e)` / `yam_emit_stream_end(e)` | Stream boundaries. |
+| `yam_emit_document_start(e, implicit)` / `yam_emit_document_end(e, implicit)` | Document boundaries; `implicit` omits `---` / `...`. |
+| `yam_emit_scalar(e, value, style, anchor, tag)` | Scalar. Plain values are quoted only when needed to read back the same. |
+| `yam_emit_alias(e, name)` | Alias (`*name`). |
+| `yam_emit_mapping_start(e, anchor, tag, flow)` / `yam_emit_mapping_end(e)` | Mapping; `flow` forces `{...}`. |
+| `yam_emit_sequence_start(e, anchor, tag, flow)` / `yam_emit_sequence_end(e)` | Sequence; `flow` forces `[...]`. |
 | `yam_str yam_emitter_output(e)` | Get output buffer. |
 | `void yam_emitter_free(e)` | Free emitter (not the arena). |
 
@@ -212,12 +246,18 @@ typedef struct {
 ## Tag Schemas
 
 Schemas resolve plain scalars to typed tags per YAML 1.2 Chapter 10.
-Schema is opt-in -- without one, scalars have no tag.
+Schema is opt-in -- without one, scalars have no tag. `yam_schema` is
+opaque; presets are static, built schemas live in the builder's arena.
+
+```c
+yam_str tag = yam_schema_resolve(yam_schema_core(), YAM_STR_LIT("42"),
+                                 YAM_SCALAR_PLAIN);   // tag:yaml.org,2002:int
+```
 
 ### Presets
 
-| Constructor | Resolves |
-|-------------|----------|
+| Function | Resolves |
+|----------|----------|
 | `yam_schema_failsafe()` | Everything is `!!str` / `!!seq` / `!!map`. |
 | `yam_schema_json()` | `null`, `true`/`false`, integers, floats. |
 | `yam_schema_core()` | JSON + `Null`/`NULL`/`~`, `True`/`TRUE`, `0x`/`0o` ints. |
@@ -247,10 +287,10 @@ yam_schema_builder_add_bools(b,
 yam_schema_builder_add_int(b);
 yam_schema_builder_add_float(b);
 
-yam_schema schema = yam_schema_builder_finish(b);
+const yam_schema *schema = yam_schema_builder_finish(b);  // lives in the arena
 yam_schema_builder_free(b);
 
-yam_parser_set_schema(parser, &schema);
+yam_parser_set_schema(parser, schema);
 ```
 
 | Function | Description |
@@ -261,7 +301,7 @@ yam_parser_set_schema(parser, &schema);
 | `yam_schema_builder_add_nulls(b, terms, n)` | Add null rules. |
 | `yam_schema_builder_add_int(b)` | Add built-in integer matcher. |
 | `yam_schema_builder_add_float(b)` | Add built-in float matcher. |
-| `yam_schema_builder_finish(b)` | Finalize schema. |
+| `yam_schema_builder_finish(b)` | Finalize schema (copied into the arena; NULL on allocation failure). |
 | `yam_schema_builder_free(b)` | Free builder. |
 
 ---
@@ -273,7 +313,7 @@ Low-level tokenizer. Most users should use the parser instead.
 | Function | Description |
 |----------|-------------|
 | `yam_scanner *yam_scanner_new(input, len, arena)` | Create scanner. |
-| `yam_status yam_scan_next(s, &tok)` | Get next token. |
+| `yam_status yam_scan_next(s, const yam_token **tok)` | Get next token (owned by the scanner, valid until the next call; NULL on error). |
 | `const char *yam_scanner_error(s)` | Error message, or NULL. |
 | `yam_mark yam_scanner_error_mark(s)` | Error location. |
 | `void yam_scanner_free(s)` | Free scanner. |
@@ -294,6 +334,7 @@ Low-level tokenizer. Most users should use the parser instead.
 | `YAM_TOK_TAG` | `!tag` or `!!type` |
 | `YAM_TOK_ANCHOR` | `&name` |
 | `YAM_TOK_ALIAS` | `*name` |
+| `YAM_TOK_DIRECTIVE` | `%YAML` / `%TAG` line (value is the whole line) |
 
 ---
 
@@ -305,4 +346,4 @@ const char *yam_token_type_str(yam_token_type t);
 const char *yam_event_type_str(yam_event_type t);
 ```
 
-Return static strings like `"YAM_OK"`, `"SCALAR"`, `"MAPPING_START"`, etc.
+Return static strings like `"ok"`, `"SCALAR"`, `"MAPPING_START"`, etc.

@@ -51,22 +51,27 @@ const char *yaml = "greeting: hello\nitems:\n  - one\n  - two\n";
 
 yam_arena  *arena  = yam_arena_new(4096);
 yam_parser *parser = yam_parser_new(yaml, strlen(yaml), arena);
-yam_event   evt;
+const yam_event *evt;
 
 while (yam_parse_next(parser, &evt) == YAM_OK) {
-    if (evt.type == YAM_EVT_STREAM_END) break;
+    if (evt->type == YAM_EVT_STREAM_END) break;
 
-    printf("%s", yam_event_type_str(evt.type));
-    if (evt.anchor.data) printf(" &%.*s", (int)evt.anchor.len, evt.anchor.data);
-    if (evt.tag.data)    printf(" <%.*s>", (int)evt.tag.len, evt.tag.data);
-    if (evt.type == YAM_EVT_SCALAR)
-        printf(" %.*s", (int)evt.value.len, evt.value.data);
+    printf("%s", yam_event_type_str(evt->type));
+    if (evt->anchor.data) printf(" &%.*s", (int)evt->anchor.len, evt->anchor.data);
+    if (evt->tag.data)    printf(" <%.*s>", (int)evt->tag.len, evt->tag.data);
+    if (evt->type == YAM_EVT_SCALAR)
+        printf(" %.*s", (int)evt->value.len, evt->value.data);
     printf("\n");
 }
 
 yam_parser_free(parser);
 yam_arena_free(arena);
 ```
+
+`yam_parse_next` hands back a pointer to an event owned by the parser,
+valid until the next call. Its string fields (`value`, `anchor`, `tag`)
+point into your input or the arena and stay valid until those are freed,
+so they can be kept without copying.
 
 ### File Input
 
@@ -93,11 +98,11 @@ const char  *yaml  = "greeting: hello\nitems:\n  - one\n  - two\n";
 yam_parser *p = yam_parser_new(yaml, strlen(yaml), arena);
 
 /* emit */
-yam_emitter *e = yam_emitter_new(YAM_EMIT_OPTS_DEFAULT, arena);
-yam_event evt;
+yam_emitter *e = yam_emitter_new(arena);
+const yam_event *evt;
 while (yam_parse_next(p, &evt) == YAM_OK) {
-    yam_emit(e, &evt);
-    if (evt.type == YAM_EVT_STREAM_END) break;
+    yam_emit(e, evt);
+    if (evt->type == YAM_EVT_STREAM_END) break;
 }
 
 yam_str out = yam_emitter_output(e);
@@ -108,6 +113,23 @@ yam_parser_free(p);
 yam_arena_free(arena);
 ```
 
+### Emitter (building output)
+
+```c
+yam_emitter *e = yam_emitter_new(arena);
+
+yam_emit_stream_start(e);
+yam_emit_document_start(e, true);                       /* implicit: no "---" */
+yam_emit_mapping_start(e, YAM_STR_NULL, YAM_STR_NULL, false);
+yam_emit_scalar(e, YAM_STR_LIT("name"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_NULL);
+yam_emit_scalar(e, YAM_STR_LIT("yam"),  YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_NULL);
+yam_emit_mapping_end(e);
+yam_emit_document_end(e, true);
+yam_emit_stream_end(e);
+
+yam_str out = yam_emitter_output(e);   /* "name: yam\n" */
+```
+
 ### Scanner (token API)
 
 For lower-level access, the scanner produces a flat token stream without
@@ -115,13 +137,13 @@ synthetic block structure tokens:
 
 ```c
 yam_scanner *scanner = yam_scanner_new(yaml, len, arena);
-yam_token    tok;
+const yam_token *tok;
 
 while (yam_scan_next(scanner, &tok) == YAM_OK) {
-    if (tok.type == YAM_TOK_STREAM_END) break;
+    if (tok->type == YAM_TOK_STREAM_END) break;
     printf("%-20s %.*s\n",
-           yam_token_type_str(tok.type),
-           (int)tok.value.len, tok.value.data);
+           yam_token_type_str(tok->type),
+           (int)tok->value.len, tok->value.data);
 }
 
 yam_scanner_free(scanner);
@@ -133,12 +155,14 @@ yam_scanner_free(scanner);
 |------|-------------|
 | `yam_str` | Non-owning string view (`data`, `len`) |
 | `yam_mark` | Source position (`offset`, `line`, `col`) |
-| `yam_token` | Scanner output (`type`, `value`, `scalar_style`, `start`, `end`) |
-| `yam_event` | Parser output (`type`, `value`, `anchor`, `tag`, `scalar_style`, `flow`) |
-| `yam_schema` | Tag resolution schema (failsafe, JSON, core, or custom) |
-| `yam_schema_rule` | Single resolution rule (`match`, `pattern`, `tag`) |
-| `yam_emitter` | Event-to-YAML emitter |
-| `yam_emit_opts` | Emitter options (`style`, `indent`, `width`, `unicode`) |
+| `yam_token` | Scanner output (`type`, `value`, `scalar_style`, `start`, `end`), owned by the scanner |
+| `yam_event` | Parser output (`type`, `value`, `anchor`, `tag`, `scalar_style`, `flow`), owned by the parser |
+| `yam_schema` | Opaque tag resolution schema (failsafe, JSON, core, or custom) |
+| `yam_emitter` | Event-to-YAML emitter, configured with setters |
+
+Tokens and events are only ever allocated by the library and read through
+`const` pointers, and configuration goes through functions, so new fields
+and options can be added without breaking compiled programs.
 
 ### Event Types
 
@@ -162,25 +186,19 @@ styles are available:
 | `YAM_EMIT_FLOW` | Flow style (`{key: value}`, `[a, b]`) |
 | `YAM_EMIT_MINIMAL` | Compact flow with minimal whitespace |
 
-Configure with `yam_emit_opts`:
+The default is block style with a 2-space indent. Change it with setters:
 
 ```c
-yam_emit_opts opts = {
-    .style   = YAM_EMIT_BLOCK,
-    .indent  = 2,      /* spaces per indent level */
-};
-yam_emitter *e = yam_emitter_new(opts, arena);
+yam_emitter *e = yam_emitter_new(arena);
+yam_emitter_set_style(e, YAM_EMIT_FLOW);
+yam_emitter_set_indent(e, 4);   /* spaces per indent level, 1-10 */
 ```
 
-Or use the defaults:
-
-```c
-yam_emitter *e = yam_emitter_new(YAM_EMIT_OPTS_DEFAULT, arena);
-```
-
-The emitter automatically quotes scalars that would be ambiguous as plain
-text (YAML keywords like `true`/`null`, numeric values, strings containing
-`: ` or ` #`, etc.).
+Plain scalars are written plain whenever that reads back as the same text,
+so `8080`, `true` and `null` keep their meaning; text that would be misread
+(`: ` or ` #` inside, leading indicators, line breaks, ...) is quoted. A
+scalar tagged `!!str` whose text looks like a number or keyword is quoted to
+stay a string.
 
 ## Merge Keys
 
@@ -263,7 +281,7 @@ Both the scanner and parser provide error messages with source locations:
 
 ```c
 yam_parser *p = yam_parser_new(yaml, strlen(yaml), arena);
-yam_event evt;
+const yam_event *evt;
 
 if (yam_parse_next(p, &evt) != YAM_OK) {
     const char *msg  = yam_parser_error(p);
@@ -294,8 +312,7 @@ built-in schemas ship as presets:
 Schema is opt-in -- without `yam_parser_set_schema()`, scalars have no tag.
 
 ```c
-yam_schema core = yam_schema_core();
-yam_parser_set_schema(parser, &core);
+yam_parser_set_schema(parser, yam_schema_core());
 
 /* events now carry resolved tags:
  *   "true"  -> tag:yaml.org,2002:bool
@@ -324,10 +341,10 @@ yam_schema_builder_add_nulls(b, nulls, 5);
 yam_schema_builder_add_int(b);    /* 42, 0xFF, 0o77 */
 yam_schema_builder_add_float(b);  /* 3.14, .inf, .nan */
 
-yam_schema schema = yam_schema_builder_finish(b);
+const yam_schema *schema = yam_schema_builder_finish(b);  /* lives in the arena */
 yam_schema_builder_free(b);
 
-yam_parser_set_schema(parser, &schema);
+yam_parser_set_schema(parser, schema);
 ```
 
 Rules are matched in order (first match wins). Match types: `YAM_MATCH_EXACT`,

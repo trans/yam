@@ -124,10 +124,10 @@ static double bench_yam(const char *input, size_t len, int *event_count) {
     yam_parser *p = yam_parser_new(input, len, a);
     yam_parser_set_max_events(p, 0);
 
-    yam_event evt;
+    const yam_event *evt;
     int count = 0;
     while (yam_parse_next(p, &evt) == YAM_OK) {
-        if (evt.type == YAM_EVT_STREAM_END || evt.type == YAM_EVT_NONE) break;
+        if (evt->type == YAM_EVT_STREAM_END || evt->type == YAM_EVT_NONE) break;
         count++;
     }
 

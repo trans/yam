@@ -52,13 +52,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     yam_parser_set_max_events(p, MAX_EVENTS);
     if (flags & 1) yam_parser_set_merge(p, true);
     if (flags & 2) yam_parser_set_resolve(p, true);
-    yam_schema core = yam_schema_core();
-    if (flags & 4) yam_parser_set_schema(p, &core);
+    const yam_schema *core = yam_schema_core();
+    if (flags & 4) yam_parser_set_schema(p, core);
 
-    yam_event evt;
+    const yam_event *evt;
     int events = 0;
     while (yam_parse_next(p, &evt) == YAM_OK) {
-        if (evt.type == YAM_EVT_STREAM_END || evt.type == YAM_EVT_NONE) break;
+        if (evt->type == YAM_EVT_STREAM_END || evt->type == YAM_EVT_NONE) break;
         if (++events > MAX_EVENTS) __builtin_trap(); /* limit bypassed */
     }
 

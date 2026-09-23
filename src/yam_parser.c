@@ -11,7 +11,7 @@
  *   after a scalar. Flow collections are handled with dedicated states.
  */
 
-#include "yam/yam.h"
+#include "yam_internal.h"
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -152,6 +152,9 @@ struct yam_parser {
     yam_status   scan_error;      /* last scanner error (for incremental path) */
     int          scan_error_out;  /* out_len when scan_error was hit */
 
+    /* event handed out by the public yam_parse_next() */
+    yam_event out_evt;
+
     /* original anchor names by binding serial (see bind_anchors) */
     yam_str *bound_names;
 
@@ -217,7 +220,7 @@ static inline bool enqueue(yam_parser *p, const yam_event *evt) {
     /* resolve tag via schema if set and no explicit tag */
     if (p->schema && dst->tag.data == NULL) {
         if (dst->type == YAM_EVT_SCALAR)
-            dst->tag = yam_schema_resolve(p->schema, dst);
+            dst->tag = yam_schema_resolve(p->schema, dst->value, dst->scalar_style);
         else if (dst->type == YAM_EVT_MAPPING_START)
             dst->tag = p->schema->default_map_tag;
         else if (dst->type == YAM_EVT_SEQUENCE_START)
@@ -265,7 +268,7 @@ static inline ctx_entry *top_ctx(yam_parser *p) {
 
 static inline yam_status peek_token(yam_parser *p) {
     if (p->have_token) return YAM_OK;
-    yam_status st = yam_scan_next(p->scanner, &p->current);
+    yam_status st = yam_scan_token(p->scanner, &p->current);
     if (st != YAM_OK) {
         const char *smsg = yam_scanner_error(p->scanner);
         if (smsg) {
@@ -4056,7 +4059,7 @@ static yam_status parser_step(yam_parser *p) {
         return parser_step_flow(p);
 
     case ST_EAGER_DRAIN:
-        /* Signal to yam_parse_next to fall back to eager mode */
+        /* Signal to next_event to fall back to eager mode */
         return YAM_OK;
 
     case ST_DONE:
@@ -4125,7 +4128,7 @@ yam_parser *yam_parser_new(const char *input, size_t len, yam_arena *a) {
     return p;
 }
 
-yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
+static yam_status next_event(yam_parser *p, yam_event *evt) {
     if (!p->incremental) {
         /* ── Eager path (merge/alias enabled, or fell back from incremental) ── */
         if (dequeue(p, evt)) return YAM_OK;
@@ -4227,7 +4230,7 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
             /* eager parse_stream will be called on the recursive call;
              * skip events already delivered during incremental phase */
             p->events_delivered = skip;
-            return yam_parse_next(p, evt);
+            return next_event(p, evt);
         }
 
         if (p->state == ST_DONE && p->out_len == 0) {
@@ -4244,6 +4247,12 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
     }
     p->events_delivered++;
     return YAM_OK;
+}
+
+yam_status yam_parse_next(yam_parser *p, const yam_event **evt) {
+    yam_status st = next_event(p, &p->out_evt);
+    *evt = st == YAM_OK ? &p->out_evt : NULL;
+    return st;
 }
 
 void yam_parser_set_schema(yam_parser *p, const yam_schema *schema) {

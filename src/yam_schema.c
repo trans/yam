@@ -11,7 +11,7 @@
  * YAML 1.1 boolean terms (on/off/yes/no).
  */
 
-#include "yam/yam.h"
+#include "yam_internal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -147,16 +147,14 @@ static bool match_float(const char *s, size_t len) {
 
 /* ── Core resolution function ────────────────────────────── */
 
-yam_str yam_schema_resolve(const yam_schema *schema, const yam_event *evt) {
-    if (evt->type != YAM_EVT_SCALAR)
-        return YAM_STR_NULL;
-
+yam_str yam_schema_resolve(const yam_schema *schema, yam_str value,
+                           yam_scalar_style style) {
     /* quoted scalars always resolve to default_quoted_tag (str) */
-    if (evt->scalar_style != YAM_SCALAR_PLAIN)
+    if (style != YAM_SCALAR_PLAIN)
         return schema->default_quoted_tag;
 
-    const char *val = evt->value.data;
-    size_t vlen = evt->value.len;
+    const char *val = value.data;
+    size_t vlen = value.len;
 
     for (int i = 0; i < schema->rule_count; i++) {
         const yam_schema_rule *r = &schema->rules[i];
@@ -195,15 +193,16 @@ yam_str yam_schema_resolve(const yam_schema *schema, const yam_event *evt) {
 
 /* ── Failsafe schema ─────────────────────────────────────── */
 
-yam_schema yam_schema_failsafe(void) {
-    return (yam_schema){
-        .rules              = NULL,
-        .rule_count         = 0,
-        .default_plain_tag  = YAM_TAG_STR,
-        .default_quoted_tag = YAM_TAG_STR,
-        .default_seq_tag    = YAM_TAG_SEQ,
-        .default_map_tag    = YAM_TAG_MAP,
-    };
+#define DEFAULT_TAGS \
+    .default_plain_tag  = { TAG_STR, sizeof(TAG_STR) - 1 }, \
+    .default_quoted_tag = { TAG_STR, sizeof(TAG_STR) - 1 }, \
+    .default_seq_tag    = { TAG_SEQ, sizeof(TAG_SEQ) - 1 }, \
+    .default_map_tag    = { TAG_MAP, sizeof(TAG_MAP) - 1 }
+
+static const yam_schema failsafe_schema = { .rules = NULL, .rule_count = 0, DEFAULT_TAGS };
+
+const yam_schema *yam_schema_failsafe(void) {
+    return &failsafe_schema;
 }
 
 /* ── JSON schema ─────────────────────────────────────────── */
@@ -216,15 +215,14 @@ static const yam_schema_rule json_rules[] = {
     { YAM_MATCH_BUILTIN, "float", { TAG_FLOAT, sizeof(TAG_FLOAT) - 1 } },
 };
 
-yam_schema yam_schema_json(void) {
-    return (yam_schema){
-        .rules              = json_rules,
-        .rule_count         = sizeof(json_rules) / sizeof(json_rules[0]),
-        .default_plain_tag  = YAM_TAG_STR,
-        .default_quoted_tag = YAM_TAG_STR,
-        .default_seq_tag    = YAM_TAG_SEQ,
-        .default_map_tag    = YAM_TAG_MAP,
-    };
+static const yam_schema json_schema = {
+    .rules = json_rules,
+    .rule_count = sizeof(json_rules) / sizeof(json_rules[0]),
+    DEFAULT_TAGS
+};
+
+const yam_schema *yam_schema_json(void) {
+    return &json_schema;
 }
 
 /* ── Core schema ─────────────────────────────────────────── */
@@ -245,15 +243,14 @@ static const yam_schema_rule core_rules[] = {
     { YAM_MATCH_BUILTIN, "float", { TAG_FLOAT, sizeof(TAG_FLOAT) - 1 } },
 };
 
-yam_schema yam_schema_core(void) {
-    return (yam_schema){
-        .rules              = core_rules,
-        .rule_count         = sizeof(core_rules) / sizeof(core_rules[0]),
-        .default_plain_tag  = YAM_TAG_STR,
-        .default_quoted_tag = YAM_TAG_STR,
-        .default_seq_tag    = YAM_TAG_SEQ,
-        .default_map_tag    = YAM_TAG_MAP,
-    };
+static const yam_schema core_schema = {
+    .rules = core_rules,
+    .rule_count = sizeof(core_rules) / sizeof(core_rules[0]),
+    DEFAULT_TAGS
+};
+
+const yam_schema *yam_schema_core(void) {
+    return &core_schema;
 }
 
 /* ── Schema builder ──────────────────────────────────────── */
@@ -263,6 +260,7 @@ struct yam_schema_builder {
     yam_schema_rule *rules;
     int              len;
     int              cap;
+    bool             oom;   /* an add failed; finish() returns NULL */
 };
 
 yam_schema_builder *yam_schema_builder_new(yam_arena *a) {
@@ -271,32 +269,37 @@ yam_schema_builder *yam_schema_builder_new(yam_arena *a) {
     b->arena = a;
     b->cap = 16;
     b->len = 0;
+    b->oom = false;
     b->rules = malloc(b->cap * sizeof(yam_schema_rule));
     if (!b->rules) { free(b); return NULL; }
     return b;
 }
 
-static void builder_ensure(yam_schema_builder *b, int need) {
-    if (b->len + need <= b->cap) return;
+/* Make room for `need` more rules. On failure the builder is marked and
+ * the caller must not add. */
+static bool builder_ensure(yam_schema_builder *b, int need) {
+    if (b->oom || need < 0) return false;
+    if (b->len + need <= b->cap) return true;
     int new_cap = b->cap * 2;
     while (new_cap < b->len + need) new_cap *= 2;
-    yam_schema_rule *new_rules = realloc(b->rules, new_cap * sizeof(yam_schema_rule));
-    if (!new_rules) return;
+    yam_schema_rule *new_rules = realloc(b->rules, (size_t)new_cap * sizeof(yam_schema_rule));
+    if (!new_rules) { b->oom = true; return false; }
     b->rules = new_rules;
     b->cap = new_cap;
+    return true;
 }
 
 void yam_schema_builder_add(yam_schema_builder *b,
                             yam_match_type match,
                             const char *pattern, yam_str tag) {
-    builder_ensure(b, 1);
+    if (!builder_ensure(b, 1)) return;
     b->rules[b->len++] = (yam_schema_rule){ match, pattern, tag };
 }
 
 void yam_schema_builder_add_bools(yam_schema_builder *b,
                                   const char **true_terms, int ntrue,
                                   const char **false_terms, int nfalse) {
-    builder_ensure(b, ntrue + nfalse);
+    if (!builder_ensure(b, ntrue + nfalse)) return;
     for (int i = 0; i < ntrue; i++)
         b->rules[b->len++] = (yam_schema_rule){ YAM_MATCH_EXACT, true_terms[i], YAM_TAG_BOOL };
     for (int i = 0; i < nfalse; i++)
@@ -305,7 +308,7 @@ void yam_schema_builder_add_bools(yam_schema_builder *b,
 
 void yam_schema_builder_add_nulls(yam_schema_builder *b,
                                   const char **terms, int nterms) {
-    builder_ensure(b, nterms);
+    if (!builder_ensure(b, nterms)) return;
     for (int i = 0; i < nterms; i++)
         b->rules[b->len++] = (yam_schema_rule){ YAM_MATCH_EXACT, terms[i], YAM_TAG_NULL };
 }
@@ -318,21 +321,23 @@ void yam_schema_builder_add_float(yam_schema_builder *b) {
     yam_schema_builder_add(b, YAM_MATCH_BUILTIN, "float", YAM_TAG_FLOAT);
 }
 
-yam_schema yam_schema_builder_finish(yam_schema_builder *b) {
-    /* Copy rules to arena for stable storage */
+const yam_schema *yam_schema_builder_finish(yam_schema_builder *b) {
+    if (b->oom) return NULL;
+    /* Copy the schema, its rules, and their patterns and tags into the
+     * arena, so it outlives the builder and the caller's strings */
+    yam_schema *schema = yam_arena_alloc(b->arena, sizeof *schema, _Alignof(yam_schema));
     yam_schema_rule *stable = yam_arena_alloc(
-        b->arena, b->len * sizeof(yam_schema_rule), _Alignof(yam_schema_rule));
-    if (stable)
-        memcpy(stable, b->rules, b->len * sizeof(yam_schema_rule));
-
-    return (yam_schema){
-        .rules              = stable,
-        .rule_count         = stable ? b->len : 0,
-        .default_plain_tag  = YAM_TAG_STR,
-        .default_quoted_tag = YAM_TAG_STR,
-        .default_seq_tag    = YAM_TAG_SEQ,
-        .default_map_tag    = YAM_TAG_MAP,
-    };
+        b->arena, (size_t)b->len * sizeof(yam_schema_rule) + 1, _Alignof(yam_schema_rule));
+    if (!schema || !stable) return NULL;
+    for (int i = 0; i < b->len; i++) {
+        const yam_schema_rule *r = &b->rules[i];
+        const char *pattern = yam_arena_dup(b->arena, r->pattern, strlen(r->pattern));
+        const char *tag = r->tag.data ? yam_arena_dup(b->arena, r->tag.data, r->tag.len) : NULL;
+        if (!pattern || (r->tag.data && !tag)) return NULL;
+        stable[i] = (yam_schema_rule){ r->match, pattern, { tag, r->tag.len } };
+    }
+    *schema = (yam_schema){ .rules = stable, .rule_count = b->len, DEFAULT_TAGS };
+    return schema;
 }
 
 void yam_schema_builder_free(yam_schema_builder *b) {

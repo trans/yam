@@ -17,6 +17,23 @@
 extern "C" {
 #endif
 
+/* ── Symbol export ───────────────────────────────────────── */
+
+/* The shared library is built with hidden visibility; only declarations
+ * marked YAM_API are exported. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define YAM_API __attribute__((visibility("default")))
+#else
+#  define YAM_API
+#endif
+
+/* ── ABI ─────────────────────────────────────────────────────
+ * Structs whose fields are listed in this header (yam_token, yam_event)
+ * are only ever allocated by the library and handed out by const pointer,
+ * so fields can be appended in later versions without breaking compiled
+ * callers. Configuration and schemas are opaque, set through functions.
+ * yam_str and yam_mark are plain value types and will not change. */
+
 /* ── Version ─────────────────────────────────────────────── */
 
 #define YAM_VERSION_MAJOR 0
@@ -104,7 +121,8 @@ typedef enum {
 
 /* ── Token ───────────────────────────────────────────────── */
 
-/** A single lexical token from the scanner. */
+/** A single lexical token from the scanner. Tokens are owned by the
+ *  scanner; see yam_scan_next(). */
 typedef struct {
     yam_token_type  type;
     yam_str         value;        /**< Scalar/tag/anchor text. */
@@ -135,8 +153,9 @@ typedef enum {
 
 /* ── Event ───────────────────────────────────────────────── */
 
-/** A parsed YAML event. All string fields point into the arena and remain
- *  valid until the arena is freed or reset. */
+/** A parsed YAML event. Events are owned by the parser; see
+ *  yam_parse_next(). String fields point into the input buffer or the
+ *  arena and remain valid until those are freed or reset. */
 typedef struct {
     yam_event_type   type;
     yam_str          value;       /**< Scalar value or alias name. */
@@ -156,28 +175,28 @@ typedef struct {
 typedef struct yam_arena yam_arena;
 
 /** Create a new arena with the given initial block capacity (min 4096). */
-yam_arena  *yam_arena_new(size_t initial_cap);
+YAM_API yam_arena  *yam_arena_new(size_t initial_cap);
 
 /** Allocate @p size bytes with @p align alignment from the arena.
  *  @p align must be a power of two (0 means 1). Returns NULL if it isn't,
  *  if the size is too large, or if memory runs out; the arena remains
  *  usable after a failed allocation. */
-void       *yam_arena_alloc(yam_arena *a, size_t size, size_t align);
+YAM_API void       *yam_arena_alloc(yam_arena *a, size_t size, size_t align);
 
 /** Duplicate @p len bytes from @p src into the arena (NUL-terminated). */
-char       *yam_arena_dup(yam_arena *a, const char *src, size_t len);
+YAM_API char       *yam_arena_dup(yam_arena *a, const char *src, size_t len);
 
 /** Reset the arena for reuse, keeping the largest block allocated. */
-void        yam_arena_reset(yam_arena *a);
+YAM_API void        yam_arena_reset(yam_arena *a);
 
 /** Free the arena and all memory allocated from it. */
-void        yam_arena_free(yam_arena *a);
+YAM_API void        yam_arena_free(yam_arena *a);
 
 /* ── File input ─────────────────────────────────────────── */
 
 /** Read an entire file into the arena. Returns a yam_str with .data=NULL
  *  on failure. The buffer is not NUL-terminated. */
-yam_str     yam_read_file(const char *path, yam_arena *a);
+YAM_API yam_str     yam_read_file(const char *path, yam_arena *a);
 
 /* ── Scanner ─────────────────────────────────────────────── */
 
@@ -186,31 +205,33 @@ typedef struct yam_scanner yam_scanner;
 
 /** Create a scanner over the given input buffer. The buffer must remain
  *  valid for the scanner's lifetime and is not copied. */
-yam_scanner *yam_scanner_new(const char *input, size_t len, yam_arena *a);
+YAM_API yam_scanner *yam_scanner_new(const char *input, size_t len, yam_arena *a);
 
-/** Retrieve the next token. Returns YAM_OK on success, YAM_ERR_SCAN on
- *  malformed input, or YAM_ERR_MEMORY on allocation failure. */
-yam_status   yam_scan_next(yam_scanner *s, yam_token *tok);
+/** Retrieve the next token. On YAM_OK, @p *tok points to a token owned by
+ *  the scanner, valid until the next call or yam_scanner_free(); on error
+ *  it is set to NULL. Returns YAM_OK, YAM_ERR_SCAN on malformed input, or
+ *  YAM_ERR_MEMORY on allocation failure. */
+YAM_API yam_status   yam_scan_next(yam_scanner *s, const yam_token **tok);
 
 /** Error message from the last failed scan, or NULL. */
-const char  *yam_scanner_error(yam_scanner *s);
+YAM_API const char  *yam_scanner_error(yam_scanner *s);
 
 /** Source location of the last scan error. */
-yam_mark     yam_scanner_error_mark(yam_scanner *s);
+YAM_API yam_mark     yam_scanner_error_mark(yam_scanner *s);
 
 /** Free the scanner (does not free the arena). */
-void         yam_scanner_free(yam_scanner *s);
+YAM_API void         yam_scanner_free(yam_scanner *s);
 
 /* ── Tag constants ───────────────────────────────────────── */
 
-extern const yam_str YAM_TAG_NULL;    /**< tag:yaml.org,2002:null  */
-extern const yam_str YAM_TAG_BOOL;    /**< tag:yaml.org,2002:bool  */
-extern const yam_str YAM_TAG_INT;     /**< tag:yaml.org,2002:int   */
-extern const yam_str YAM_TAG_FLOAT;   /**< tag:yaml.org,2002:float */
-extern const yam_str YAM_TAG_STR;     /**< tag:yaml.org,2002:str   */
-extern const yam_str YAM_TAG_SEQ;     /**< tag:yaml.org,2002:seq   */
-extern const yam_str YAM_TAG_MAP;     /**< tag:yaml.org,2002:map   */
-extern const yam_str YAM_TAG_MERGE;   /**< tag:yaml.org,2002:merge */
+YAM_API extern const yam_str YAM_TAG_NULL;    /**< tag:yaml.org,2002:null  */
+YAM_API extern const yam_str YAM_TAG_BOOL;    /**< tag:yaml.org,2002:bool  */
+YAM_API extern const yam_str YAM_TAG_INT;     /**< tag:yaml.org,2002:int   */
+YAM_API extern const yam_str YAM_TAG_FLOAT;   /**< tag:yaml.org,2002:float */
+YAM_API extern const yam_str YAM_TAG_STR;     /**< tag:yaml.org,2002:str   */
+YAM_API extern const yam_str YAM_TAG_SEQ;     /**< tag:yaml.org,2002:seq   */
+YAM_API extern const yam_str YAM_TAG_MAP;     /**< tag:yaml.org,2002:map   */
+YAM_API extern const yam_str YAM_TAG_MERGE;   /**< tag:yaml.org,2002:merge */
 
 /* ── Schema ──────────────────────────────────────────────── */
 
@@ -221,36 +242,24 @@ typedef enum {
     YAM_MATCH_BUILTIN,   /**< Procedural matcher (int, float). */
 } yam_match_type;
 
-/** A single tag resolution rule: if a plain scalar matches @p pattern
- *  according to @p match, resolve it to @p tag. */
-typedef struct {
-    yam_match_type  match;
-    const char     *pattern;   /**< String for EXACT/ICASE, name for BUILTIN. */
-    yam_str         tag;       /**< Resolved tag. */
-} yam_schema_rule;
+/** Opaque tag schema for resolving plain scalars to typed tags. Use one
+ *  of the presets or build a custom schema. */
+typedef struct yam_schema yam_schema;
 
-/** Tag schema for resolving plain scalars to typed tags.
- *  Use one of the preset constructors or build a custom schema. */
-typedef struct {
-    const yam_schema_rule *rules;
-    int                    rule_count;
-    yam_str                default_plain_tag;   /**< Unmatched plain scalars. */
-    yam_str                default_quoted_tag;   /**< All quoted scalars. */
-    yam_str                default_seq_tag;      /**< Untagged sequences. */
-    yam_str                default_map_tag;      /**< Untagged mappings. */
-} yam_schema;
-
-/** YAML 1.2 Failsafe schema: everything is !!str / !!seq / !!map. */
-yam_schema yam_schema_failsafe(void);
+/** YAML 1.2 Failsafe schema: everything is !!str / !!seq / !!map.
+ *  Presets are static and never need freeing. */
+YAM_API const yam_schema *yam_schema_failsafe(void);
 
 /** YAML 1.2 JSON schema: null, true/false, integers, floats. */
-yam_schema yam_schema_json(void);
+YAM_API const yam_schema *yam_schema_json(void);
 
 /** YAML 1.2 Core schema: JSON + Null/NULL/~, True/TRUE, 0x/0o ints, etc. */
-yam_schema yam_schema_core(void);
+YAM_API const yam_schema *yam_schema_core(void);
 
-/** Resolve a scalar event's tag using the given schema. */
-yam_str    yam_schema_resolve(const yam_schema *schema, const yam_event *evt);
+/** Resolve the tag of a scalar with the given value and style: quoted
+ *  scalars are strings, plain ones are matched against the schema's rules. */
+YAM_API yam_str    yam_schema_resolve(const yam_schema *schema, yam_str value,
+                                      yam_scalar_style style);
 
 /* ── Schema builder ──────────────────────────────────────── */
 
@@ -258,87 +267,96 @@ yam_str    yam_schema_resolve(const yam_schema *schema, const yam_event *evt);
 typedef struct yam_schema_builder yam_schema_builder;
 
 /** Create a new schema builder (allocates from the arena). */
-yam_schema_builder *yam_schema_builder_new(yam_arena *a);
+YAM_API yam_schema_builder *yam_schema_builder_new(yam_arena *a);
 
 /** Add a tag resolution rule. */
-void    yam_schema_builder_add(yam_schema_builder *b,
+YAM_API void    yam_schema_builder_add(yam_schema_builder *b,
                                yam_match_type match,
                                const char *pattern, yam_str tag);
 
 /** Add boolean resolution rules (e.g. "true"/"yes" -> !!bool). */
-void    yam_schema_builder_add_bools(yam_schema_builder *b,
+YAM_API void    yam_schema_builder_add_bools(yam_schema_builder *b,
                                      const char **true_terms, int ntrue,
                                      const char **false_terms, int nfalse);
 
 /** Add null resolution rules (e.g. "null"/"~" -> !!null). */
-void    yam_schema_builder_add_nulls(yam_schema_builder *b,
+YAM_API void    yam_schema_builder_add_nulls(yam_schema_builder *b,
                                      const char **terms, int nterms);
 
 /** Add the built-in integer matcher (decimal, hex, octal). */
-void    yam_schema_builder_add_int(yam_schema_builder *b);
+YAM_API void    yam_schema_builder_add_int(yam_schema_builder *b);
 
 /** Add the built-in float matcher (decimal, .inf, .nan). */
-void    yam_schema_builder_add_float(yam_schema_builder *b);
+YAM_API void    yam_schema_builder_add_float(yam_schema_builder *b);
 
-/** Finalize and return the schema. The builder can be freed after this. */
-yam_schema yam_schema_builder_finish(yam_schema_builder *b);
+/** Finalize and return the schema, allocated in the builder's arena (it
+ *  lives until the arena is freed). The builder can be freed after this.
+ *  Returns NULL on allocation failure. */
+YAM_API const yam_schema *yam_schema_builder_finish(yam_schema_builder *b);
 
 /** Free the schema builder. */
-void    yam_schema_builder_free(yam_schema_builder *b);
+YAM_API void    yam_schema_builder_free(yam_schema_builder *b);
 
 /* ── Parser ──────────────────────────────────────────────── */
 
 /** Opaque event parser. Consumes tokens from the scanner and produces
- *  a well-formed stream of yam_event values. */
+ *  a well-formed stream of events. */
 typedef struct yam_parser yam_parser;
 
 /** Create a parser over the given input buffer. The buffer must remain
  *  valid for the parser's lifetime and is not copied.
  *  @return Parser instance, or NULL on allocation failure. */
-yam_parser *yam_parser_new(const char *input, size_t len, yam_arena *a);
+YAM_API yam_parser *yam_parser_new(const char *input, size_t len, yam_arena *a);
 
-/** Retrieve the next event. The full stream is parsed eagerly on the
- *  first call; subsequent calls drain the event queue.
- *  @return YAM_OK on success, or an error status. Check with
- *          yam_parser_error() for a message on failure. */
-yam_status  yam_parse_next(yam_parser *p, yam_event *evt);
+/** Retrieve the next event. On YAM_OK, @p *evt points to an event owned
+ *  by the parser, valid until the next call or yam_parser_free(); copy it
+ *  (or the fields you need) to keep it longer. On error @p *evt is set to
+ *  NULL. After YAM_EVT_STREAM_END every call returns a YAM_EVT_NONE event.
+ *
+ *  Events are produced incrementally as input is consumed, except when
+ *  merge keys, alias resolution, a schema, directives, or node properties
+ *  require looking at the whole stream first.
+ *  @return YAM_OK on success, or an error status; yam_parser_error() and
+ *          yam_parser_error_mark() describe the error. */
+YAM_API yam_status  yam_parse_next(yam_parser *p, const yam_event **evt);
 
-/** Set a tag schema for automatic tag resolution on scalars. */
-void        yam_parser_set_schema(yam_parser *p, const yam_schema *schema);
+/** Set a tag schema for automatic tag resolution on scalars. The schema
+ *  must outlive the parser. */
+YAM_API void        yam_parser_set_schema(yam_parser *p, const yam_schema *schema);
 
 /** Enable/disable merge key (@c <<) expansion. Disabled by default.
  *  A merge value must be a mapping, an alias to one, or a sequence of
  *  those; anything else is a YAM_ERR_PARSE. */
-void        yam_parser_set_merge(yam_parser *p, bool enable);
+YAM_API void        yam_parser_set_merge(yam_parser *p, bool enable);
 
 /** Enable/disable alias resolution (inline expansion of @c *alias
  *  references). Disabled by default. An alias refers to the most recent
  *  anchor of that name before it in the same document. Cyclic aliases,
  *  and aliases with no preceding anchor, are kept as YAM_EVT_ALIAS
  *  events. */
-void        yam_parser_set_resolve(yam_parser *p, bool enable);
+YAM_API void        yam_parser_set_resolve(yam_parser *p, bool enable);
 
 /** Set the maximum number of events before the parser stops with an error.
  *  Default is 10,000. Set to 0 to disable the limit.
  *  Exceeding it returns YAM_ERR_LIMIT; alias/merge expansion is bounded
  *  by the same limit. @see README "Safety Limits" for sizing guidance. */
-void        yam_parser_set_max_events(yam_parser *p, int max);
+YAM_API void        yam_parser_set_max_events(yam_parser *p, int max);
 
 /** Set the maximum nesting depth of collections. Exceeding it stops the
  *  parser with YAM_ERR_LIMIT. Default is 256. Set to 0 to disable the
  *  limit, but note that some inputs (tags, anchors, merge keys, alias
  *  resolution) are parsed recursively, using roughly 1 KB of stack per
  *  level, so very deep input can then overflow the stack. */
-void        yam_parser_set_max_depth(yam_parser *p, int max);
+YAM_API void        yam_parser_set_max_depth(yam_parser *p, int max);
 
 /** Error message from the last failed parse, or NULL. */
-const char *yam_parser_error(yam_parser *p);
+YAM_API const char *yam_parser_error(yam_parser *p);
 
 /** Source location of the last parse error. */
-yam_mark    yam_parser_error_mark(yam_parser *p);
+YAM_API yam_mark    yam_parser_error_mark(yam_parser *p);
 
 /** Free the parser (does not free the arena). */
-void        yam_parser_free(yam_parser *p);
+YAM_API void        yam_parser_free(yam_parser *p);
 
 /* ── Emitter ─────────────────────────────────────────────── */
 
@@ -352,39 +370,72 @@ typedef enum {
     YAM_EMIT_MINIMAL,    /**< Minimal whitespace. */
 } yam_emit_style;
 
-/** Emitter configuration. Use YAM_EMIT_OPTS_DEFAULT for sensible defaults. */
-typedef struct {
-    yam_emit_style style;
-    int            indent;       /**< Spaces per indent level (default 2). */
-} yam_emit_opts;
+/** Create an emitter: block style, 2-space indent. Output is written to
+ *  an internal buffer retrievable with yam_emitter_output().
+ *  @return Emitter instance, or NULL on allocation failure. */
+YAM_API yam_emitter *yam_emitter_new(yam_arena *a);
 
-/** Default emitter options: block style, 2-space indent. */
-#define YAM_EMIT_OPTS_DEFAULT ((yam_emit_opts){YAM_EMIT_BLOCK, 2})
+/** Set the output style (default YAM_EMIT_BLOCK). */
+YAM_API void         yam_emitter_set_style(yam_emitter *e, yam_emit_style style);
 
-/** Create an emitter with the given options. Output is written to an
- *  internal buffer retrievable with yam_emitter_output(). */
-yam_emitter *yam_emitter_new(yam_emit_opts opts, yam_arena *a);
+/** Set the spaces per indentation level, 1-10 (default 2). */
+YAM_API void         yam_emitter_set_indent(yam_emitter *e, int indent);
 
-/** Feed one event to the emitter. Events must arrive in the same
- *  well-formed order as produced by the parser. */
-yam_status   yam_emit(yam_emitter *e, const yam_event *evt);
+/* Events are fed in the same well-formed order the parser produces:
+ * STREAM_START (DOC_START node DOC_END)* STREAM_END. Anchor and tag
+ * arguments may be YAM_STR_NULL. Tags are full tags (e.g.
+ * "tag:yaml.org,2002:str", written as !!str) or local tags ("!foo"). */
+
+/** Re-emit an event obtained from yam_parse_next() (e.g. to reformat a
+ *  document). To build output yourself, use the functions below. */
+YAM_API yam_status   yam_emit(yam_emitter *e, const yam_event *evt);
+
+YAM_API yam_status   yam_emit_stream_start(yam_emitter *e);
+YAM_API yam_status   yam_emit_stream_end(yam_emitter *e);
+
+/** Start a document; @p implicit omits the "---" marker. */
+YAM_API yam_status   yam_emit_document_start(yam_emitter *e, bool implicit);
+
+/** End a document; @p implicit omits the "..." marker. */
+YAM_API yam_status   yam_emit_document_end(yam_emitter *e, bool implicit);
+
+/** Emit a scalar. YAM_SCALAR_PLAIN writes the value plain when that reads
+ *  back as the same text, and quotes it otherwise; the other styles are
+ *  honored where valid (block styles fall back to double-quoted in flow
+ *  context). */
+YAM_API yam_status   yam_emit_scalar(yam_emitter *e, yam_str value,
+                                     yam_scalar_style style,
+                                     yam_str anchor, yam_str tag);
+
+/** Emit an alias (@c *name). */
+YAM_API yam_status   yam_emit_alias(yam_emitter *e, yam_str name);
+
+/** Start a mapping; @p flow forces flow style ({...}) for it. */
+YAM_API yam_status   yam_emit_mapping_start(yam_emitter *e, yam_str anchor,
+                                            yam_str tag, bool flow);
+YAM_API yam_status   yam_emit_mapping_end(yam_emitter *e);
+
+/** Start a sequence; @p flow forces flow style ([...]) for it. */
+YAM_API yam_status   yam_emit_sequence_start(yam_emitter *e, yam_str anchor,
+                                             yam_str tag, bool flow);
+YAM_API yam_status   yam_emit_sequence_end(yam_emitter *e);
 
 /** Retrieve the emitter's output buffer. Valid until the arena is freed. */
-yam_str      yam_emitter_output(yam_emitter *e);
+YAM_API yam_str      yam_emitter_output(yam_emitter *e);
 
 /** Free the emitter (does not free the arena). */
-void         yam_emitter_free(yam_emitter *e);
+YAM_API void         yam_emitter_free(yam_emitter *e);
 
 /* ── Convenience ─────────────────────────────────────────── */
 
 /** Return a human-readable name for a status code. */
-const char *yam_status_str(yam_status s);
+YAM_API const char *yam_status_str(yam_status s);
 
 /** Return a human-readable name for a token type. */
-const char *yam_token_type_str(yam_token_type t);
+YAM_API const char *yam_token_type_str(yam_token_type t);
 
 /** Return a human-readable name for an event type. */
-const char *yam_event_type_str(yam_event_type t);
+YAM_API const char *yam_event_type_str(yam_event_type t);
 
 #ifdef __cplusplus
 }

@@ -35,10 +35,10 @@ static event_list parse_with(const char *yaml, bool resolve, bool merge) {
     if (resolve) yam_parser_set_resolve(p, true);
     if (merge) yam_parser_set_merge(p, true);
 
-    yam_event evt;
+    const yam_event *evt;
     while (el.len < 512 && yam_parse_next(p, &evt) == YAM_OK) {
-        el.events[el.len++] = evt;
-        if (evt.type == YAM_EVT_STREAM_END) break;
+        el.events[el.len++] = *evt;
+        if (evt->type == YAM_EVT_STREAM_END) break;
     }
 
     yam_parser_free(p);
@@ -331,10 +331,10 @@ static void test_billion_laughs(void) {
             if (merge) yam_parser_set_merge(p, true);
             if (!max) yam_parser_set_max_events(p, 0);
 
-            yam_event evt;
+            const yam_event *evt;
             yam_status st;
             while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
-                   evt.type != YAM_EVT_STREAM_END && evt.type != YAM_EVT_NONE)
+                   evt->type != YAM_EVT_STREAM_END && evt->type != YAM_EVT_NONE)
                 ;
             ASSERT(st == YAM_ERR_LIMIT, "exponential alias expansion hits a limit");
             const char *msg = yam_parser_error(p);

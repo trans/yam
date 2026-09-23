@@ -1,7 +1,7 @@
 /*
  * test_yaml_suite.c — YAML Test Suite runner for yam parser
  *
- * Reads test cases from yaml-test-suite/src/*.yaml,
+ * Reads test cases from yaml-test-suite/src/<id>.yaml,
  * runs the parser, and compares output events against expected trees.
  */
 
@@ -272,7 +272,7 @@ static int parse_test_file(const char *path, const char *id, test_case *cases, i
 
         test_case *tc = &cases[count];
         memset(tc, 0, sizeof(test_case));
-        strncpy(tc->id, id, sizeof(tc->id) - 1);
+        snprintf(tc->id, sizeof(tc->id), "%s", id);
         tc->index = count;
 
         int base_indent = 2; /* entries are indented 2 spaces */
@@ -473,9 +473,8 @@ static size_t format_event(const yam_event *evt, char *buf, size_t cap) {
                            (int)evt->tag.len, evt->tag.data);
         }
         char escaped[4096];
-        size_t elen = 0;
         if (evt->value.data && evt->value.len > 0) {
-            elen = escape_scalar(evt->value.data, evt->value.len, escaped, sizeof(escaped));
+            escape_scalar(evt->value.data, evt->value.len, escaped, sizeof(escaped));
         } else {
             escaped[0] = '\0';
         }
@@ -533,7 +532,7 @@ static test_result run_test(test_case *tc, bool verbose, bool eager) {
     /* collect events */
     char actual[16384];
     size_t actual_len = 0;
-    yam_event evt;
+    const yam_event *evt;
     yam_status st;
     bool parse_error = false;
     int evt_count = 0;
@@ -544,13 +543,13 @@ static test_result run_test(test_case *tc, bool verbose, bool eager) {
             parse_error = true;
             break;
         }
-        if (evt.type == YAM_EVT_NONE) break;
+        if (evt->type == YAM_EVT_NONE) break;
 
-        actual_len += format_event(&evt, actual + actual_len,
+        actual_len += format_event(evt, actual + actual_len,
                                    sizeof(actual) - actual_len);
         evt_count++;
 
-        if (evt.type == YAM_EVT_STREAM_END) break;
+        if (evt->type == YAM_EVT_STREAM_END) break;
     }
 
     yam_parser_free(parser);
@@ -664,7 +663,8 @@ int main(int argc, char **argv) {
 
         /* extract test ID */
         char id[16];
-        strncpy(id, ent->d_name, nlen - 5);
+        if (nlen - 5 >= sizeof(id)) continue; /* not a suite ID */
+        memcpy(id, ent->d_name, nlen - 5);
         id[nlen - 5] = '\0';
 
         if (filter && strstr(id, filter) == NULL) continue;

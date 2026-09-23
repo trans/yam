@@ -11,7 +11,7 @@ CFLAGS  ?= -O2 -march=native
 WARNINGS := -Wall -Wextra -Wpedantic
 
 # Flags always applied; do not override these from the command line.
-YAM_CFLAGS  := -std=c11 $(WARNINGS) $(CFLAGS) -Iinclude
+YAM_CFLAGS  := -std=c11 $(WARNINGS) $(CFLAGS) -Iinclude -fvisibility=hidden
 YAM_LDFLAGS := $(LDFLAGS)
 
 SRCDIR   := src

@@ -38,14 +38,14 @@ static void render(const char *yaml, bool eager, char *out, size_t cap) {
     yam_parser *p = yam_parser_new(yaml, strlen(yaml), a);
     if (eager) yam_parser_set_merge(p, true);
 
-    yam_event evt;
+    const yam_event *evt;
     yam_status st;
     for (int guard = 0; guard < 1000; guard++) {
         st = yam_parse_next(p, &evt);
         if (st != YAM_OK) { n += snprintf(out + n, cap - n, n ? " ERR" : "ERR"); break; }
-        if (evt.type == YAM_EVT_NONE || evt.type == YAM_EVT_STREAM_END) break;
+        if (evt->type == YAM_EVT_NONE || evt->type == YAM_EVT_STREAM_END) break;
         const char *s = NULL;
-        switch (evt.type) {
+        switch (evt->type) {
         case YAM_EVT_SEQUENCE_START: s = "["; break;
         case YAM_EVT_SEQUENCE_END:   s = "]"; break;
         case YAM_EVT_MAPPING_START:  s = "{"; break;
@@ -54,16 +54,16 @@ static void render(const char *yaml, bool eager, char *out, size_t cap) {
         default: continue;
         }
         if (n) n += snprintf(out + n, cap - n, " ");
-        if (evt.anchor.data)
-            n += snprintf(out + n, cap - n, "&%.*s ", (int)evt.anchor.len, evt.anchor.data);
+        if (evt->anchor.data)
+            n += snprintf(out + n, cap - n, "&%.*s ", (int)evt->anchor.len, evt->anchor.data);
         if (s) {
             n += snprintf(out + n, cap - n, "%s", s);
-        } else if (evt.type == YAM_EVT_ALIAS) {
-            n += snprintf(out + n, cap - n, "*%.*s", (int)evt.value.len, evt.value.data);
-        } else if (evt.value.len == 0) {
+        } else if (evt->type == YAM_EVT_ALIAS) {
+            n += snprintf(out + n, cap - n, "*%.*s", (int)evt->value.len, evt->value.data);
+        } else if (evt->value.len == 0) {
             n += snprintf(out + n, cap - n, "~");
         } else {
-            n += snprintf(out + n, cap - n, "%.*s", (int)evt.value.len, evt.value.data);
+            n += snprintf(out + n, cap - n, "%.*s", (int)evt->value.len, evt->value.data);
         }
         if (n >= cap) break;
     }
@@ -152,11 +152,11 @@ static void test_quoted_values(void) {
     const char *yaml = "{\"key\": \"value\"}";
     yam_arena  *a = yam_arena_new(4096);
     yam_parser *p = yam_parser_new(yaml, strlen(yaml), a);
-    yam_event evt;
+    const yam_event *evt;
     int scalars = 0;
-    while (yam_parse_next(p, &evt) == YAM_OK && evt.type != YAM_EVT_STREAM_END) {
-        if (evt.type != YAM_EVT_SCALAR) continue;
-        ASSERT(evt.value.data >= yaml && evt.value.data < yaml + strlen(yaml),
+    while (yam_parse_next(p, &evt) == YAM_OK && evt->type != YAM_EVT_STREAM_END) {
+        if (evt->type != YAM_EVT_SCALAR) continue;
+        ASSERT(evt->value.data >= yaml && evt->value.data < yaml + strlen(yaml),
                "unescaped double-quoted scalar points into the input");
         scalars++;
     }
@@ -198,11 +198,11 @@ static void test_deep_nesting_linear(void) {
     yam_parser *p = yam_parser_new(buf, (size_t)depth * 2 + 1, a);
     yam_parser_set_max_events(p, 0);
     yam_parser_set_max_depth(p, 0);
-    yam_event evt;
+    const yam_event *evt;
     yam_status st;
     int events = 0;
     while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
-           evt.type != YAM_EVT_STREAM_END && evt.type != YAM_EVT_NONE)
+           evt->type != YAM_EVT_STREAM_END && evt->type != YAM_EVT_NONE)
         events++;
     double elapsed = now() - t0;
 
@@ -225,11 +225,11 @@ static yam_status parse_all(const char *yaml, size_t len, bool eager,
     if (eager) yam_parser_set_merge(p, true);
     yam_parser_set_max_events(p, 0);
     if (max_depth >= 0) yam_parser_set_max_depth(p, max_depth);
-    yam_event evt;
+    const yam_event *evt;
     yam_status st;
     int guard = 0;
     while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
-           evt.type != YAM_EVT_STREAM_END && evt.type != YAM_EVT_NONE &&
+           evt->type != YAM_EVT_STREAM_END && evt->type != YAM_EVT_NONE &&
            ++guard < 10000000)
         ;
     static char buf[256];
@@ -277,10 +277,10 @@ static void test_event_limit(void) {
         yam_parser *p = yam_parser_new(yaml, strlen(yaml), a);
         if (eager) yam_parser_set_merge(p, true);
         yam_parser_set_max_events(p, 5);
-        yam_event evt;
+        const yam_event *evt;
         yam_status st;
         while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
-               evt.type != YAM_EVT_STREAM_END && evt.type != YAM_EVT_NONE)
+               evt->type != YAM_EVT_STREAM_END && evt->type != YAM_EVT_NONE)
             ;
         ASSERT(st == YAM_ERR_LIMIT, "event limit returns YAM_ERR_LIMIT");
         const char *m = yam_parser_error(p);

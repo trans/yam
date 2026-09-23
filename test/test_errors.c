@@ -75,18 +75,18 @@ static void test_read_and_parse(void) {
     yam_parser *p = yam_parser_new(data.data, data.len, a);
     ASSERT(p != NULL, "parser created");
 
-    yam_event evt;
+    const yam_event *evt;
     yam_status st;
     int scalar_count = 0;
     bool found_hello = false, found_world = false;
 
     while ((st = yam_parse_next(p, &evt)) == YAM_OK) {
-        if (evt.type == YAM_EVT_STREAM_END) break;
-        if (evt.type == YAM_EVT_SCALAR) {
+        if (evt->type == YAM_EVT_STREAM_END) break;
+        if (evt->type == YAM_EVT_SCALAR) {
             scalar_count++;
-            if (evt.value.len == 5 && memcmp(evt.value.data, "hello", 5) == 0)
+            if (evt->value.len == 5 && memcmp(evt->value.data, "hello", 5) == 0)
                 found_hello = true;
-            if (evt.value.len == 5 && memcmp(evt.value.data, "world", 5) == 0)
+            if (evt->value.len == 5 && memcmp(evt->value.data, "world", 5) == 0)
                 found_world = true;
         }
     }
@@ -110,7 +110,7 @@ static void test_unterminated_single_quote(void) {
     yam_arena *a = yam_arena_new(4096);
     yam_scanner *s = yam_scanner_new(yaml, strlen(yaml), a);
 
-    yam_token tok;
+    const yam_token *tok;
     yam_status st;
     /* skip STREAM_START */
     st = yam_scan_next(s, &tok);
@@ -137,7 +137,7 @@ static void test_unterminated_double_quote(void) {
     yam_arena *a = yam_arena_new(4096);
     yam_scanner *s = yam_scanner_new(yaml, strlen(yaml), a);
 
-    yam_token tok;
+    const yam_token *tok;
     yam_status st;
     st = yam_scan_next(s, &tok); /* STREAM_START */
     st = yam_scan_next(s, &tok);
@@ -158,7 +158,7 @@ static void test_invalid_escape(void) {
     yam_arena *a = yam_arena_new(4096);
     yam_scanner *s = yam_scanner_new(yaml, strlen(yaml), a);
 
-    yam_token tok;
+    const yam_token *tok;
     yam_status st;
     st = yam_scan_next(s, &tok); /* STREAM_START */
     st = yam_scan_next(s, &tok);
@@ -179,7 +179,7 @@ static void test_empty_anchor(void) {
     yam_arena *a = yam_arena_new(4096);
     yam_scanner *s = yam_scanner_new(yaml, strlen(yaml), a);
 
-    yam_token tok;
+    const yam_token *tok;
     yam_status st;
     st = yam_scan_next(s, &tok); /* STREAM_START */
     st = yam_scan_next(s, &tok);
@@ -202,11 +202,11 @@ static void test_missing_flow_seq_end(void) {
     yam_arena *a = yam_arena_new(4096);
     yam_parser *p = yam_parser_new(yaml, strlen(yaml), a);
 
-    yam_event evt;
+    const yam_event *evt;
     yam_status st;
     bool got_error = false;
     while ((st = yam_parse_next(p, &evt)) == YAM_OK) {
-        if (evt.type == YAM_EVT_STREAM_END) break;
+        if (evt->type == YAM_EVT_STREAM_END) break;
     }
     if (st != YAM_OK) got_error = true;
 
@@ -231,11 +231,11 @@ static void test_missing_flow_map_end(void) {
     yam_arena *a = yam_arena_new(4096);
     yam_parser *p = yam_parser_new(yaml, strlen(yaml), a);
 
-    yam_event evt;
+    const yam_event *evt;
     yam_status st;
     bool got_error = false;
     while ((st = yam_parse_next(p, &evt)) == YAM_OK) {
-        if (evt.type == YAM_EVT_STREAM_END) break;
+        if (evt->type == YAM_EVT_STREAM_END) break;
     }
     if (st != YAM_OK) got_error = true;
 
@@ -257,11 +257,11 @@ static void test_scanner_error_through_parser(void) {
     yam_arena *a = yam_arena_new(4096);
     yam_parser *p = yam_parser_new(yaml, strlen(yaml), a);
 
-    yam_event evt;
+    const yam_event *evt;
     yam_status st;
     bool got_error = false;
     while ((st = yam_parse_next(p, &evt)) == YAM_OK) {
-        if (evt.type == YAM_EVT_STREAM_END) break;
+        if (evt->type == YAM_EVT_STREAM_END) break;
     }
     if (st != YAM_OK) got_error = true;
 
@@ -290,9 +290,9 @@ static void test_no_scanner_error(void) {
     yam_arena *a = yam_arena_new(4096);
     yam_scanner *s = yam_scanner_new(yaml, strlen(yaml), a);
 
-    yam_token tok;
+    const yam_token *tok;
     while (yam_scan_next(s, &tok) == YAM_OK) {
-        if (tok.type == YAM_TOK_STREAM_END) break;
+        if (tok->type == YAM_TOK_STREAM_END) break;
     }
 
     ASSERT(yam_scanner_error(s) == NULL, "no error on valid input");
@@ -308,9 +308,9 @@ static void test_no_parser_error(void) {
     yam_arena *a = yam_arena_new(4096);
     yam_parser *p = yam_parser_new(yaml, strlen(yaml), a);
 
-    yam_event evt;
+    const yam_event *evt;
     while (yam_parse_next(p, &evt) == YAM_OK) {
-        if (evt.type == YAM_EVT_STREAM_END) break;
+        if (evt->type == YAM_EVT_STREAM_END) break;
     }
 
     ASSERT(yam_parser_error(p) == NULL, "no error on valid input");
@@ -335,12 +335,12 @@ static void test_block_scalar_trailing_spaces(void) {
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
         yam_arena *a = yam_arena_new(4096);
         yam_parser *p = yam_parser_new(cases[i][0], strlen(cases[i][0]), a);
-        yam_event evt;
+        const yam_event *evt;
         yam_str val = YAM_STR_NULL;
         yam_status st;
         while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
-               evt.type != YAM_EVT_STREAM_END && evt.type != YAM_EVT_NONE)
-            if (evt.type == YAM_EVT_SCALAR) val = evt.value;
+               evt->type != YAM_EVT_STREAM_END && evt->type != YAM_EVT_NONE)
+            if (evt->type == YAM_EVT_SCALAR) val = evt->value;
         ASSERT(st == YAM_OK, "block scalar ending in spaces parses");
         ASSERT(val.len == strlen(cases[i][1]) &&
                memcmp(val.data, cases[i][1], val.len) == 0,
@@ -361,15 +361,15 @@ static void test_bom(void) {
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
         yam_arena *a = yam_arena_new(4096);
         yam_parser *p = yam_parser_new(cases[i], strlen(cases[i]), a);
-        yam_event evt;
+        const yam_event *evt;
         yam_status st;
         bool found = false;
-        while ((st = yam_parse_next(p, &evt)) == YAM_OK && evt.type != YAM_EVT_STREAM_END) {
-            if (evt.type == YAM_EVT_SCALAR && !found) {
+        while ((st = yam_parse_next(p, &evt)) == YAM_OK && evt->type != YAM_EVT_STREAM_END) {
+            if (evt->type == YAM_EVT_SCALAR && !found) {
                 found = true;
-                ASSERT(evt.value.len == 3 && memcmp(evt.value.data, "key", 3) == 0,
+                ASSERT(evt->value.len == 3 && memcmp(evt->value.data, "key", 3) == 0,
                        "BOM is not part of the first key");
-                ASSERT(evt.value.data == cases[i] + evt.start.offset,
+                ASSERT(evt->value.data == cases[i] + evt->start.offset,
                        "offsets are relative to the input buffer");
             }
         }
@@ -408,6 +408,54 @@ static void test_arena_limits(void) {
     yam_arena_free(a);
 }
 
+/* ── Library-owned events and tokens ───────────────────────── */
+
+static void test_owned_pointers(void) {
+    printf("test_owned_pointers:\n");
+    yam_arena *a = yam_arena_new(4096);
+
+    /* events: valid pointer on success, NULL on error */
+    const char *bad = "a: [b\n";
+    yam_parser *p = yam_parser_new(bad, strlen(bad), a);
+    const yam_event *evt = NULL;
+    yam_status st;
+    while ((st = yam_parse_next(p, &evt)) == YAM_OK) {
+        ASSERT(evt != NULL, "event pointer set on success");
+        if (evt->type == YAM_EVT_STREAM_END) break;
+    }
+    ASSERT(st != YAM_OK && evt == NULL, "event pointer is NULL on error");
+    yam_parser_free(p);
+
+    /* after the end: YAM_EVT_NONE */
+    p = yam_parser_new("a", 1, a);
+    while (yam_parse_next(p, &evt) == YAM_OK && evt->type != YAM_EVT_STREAM_END)
+        ;
+    ASSERT(yam_parse_next(p, &evt) == YAM_OK && evt->type == YAM_EVT_NONE,
+           "YAM_EVT_NONE after the end of the stream");
+    yam_parser_free(p);
+
+    /* tokens */
+    yam_scanner *s = yam_scanner_new("a: 'b", 5, a);
+    const yam_token *tok = NULL;
+    while ((st = yam_scan_next(s, &tok)) == YAM_OK && tok->type != YAM_TOK_STREAM_END)
+        ;
+    ASSERT(st == YAM_ERR_SCAN && tok == NULL, "token pointer is NULL on error");
+    yam_scanner_free(s);
+
+    /* a built schema copies its strings */
+    yam_schema_builder *b = yam_schema_builder_new(a);
+    char term[] = "yes";
+    const char *terms[] = { term };
+    yam_schema_builder_add_bools(b, terms, 1, NULL, 0);
+    const yam_schema *schema = yam_schema_builder_finish(b);
+    yam_schema_builder_free(b);
+    term[0] = 'n';
+    ASSERT(schema && yam_schema_resolve(schema, YAM_STR_LIT("yes"), YAM_SCALAR_PLAIN).len ==
+                     YAM_TAG_BOOL.len, "built schema doesn't depend on caller strings");
+
+    yam_arena_free(a);
+}
+
 /* ── Main ───────────────────────────────────────────────────── */
 
 int main(void) {
@@ -435,6 +483,7 @@ int main(void) {
     test_block_scalar_trailing_spaces();
     test_bom();
     test_arena_limits();
+    test_owned_pointers();
 
     printf("\n--- Error tests: %d / %d passed ---\n", tests_passed, tests_run);
     if (tests_failed > 0) printf("    %d FAILED\n", tests_failed);

@@ -23,14 +23,15 @@ static int tests_failed = 0;
 
 /* ── Helper: emit events from a YAML string, return output ── */
 
-static yam_str roundtrip(const char *yaml, yam_emit_opts opts, yam_arena *a) {
+static yam_str roundtrip(const char *yaml, yam_emit_style opts, yam_arena *a) {
     yam_parser *p = yam_parser_new(yaml, strlen(yaml), a);
-    yam_emitter *e = yam_emitter_new(opts, a);
-    yam_event evt;
+    yam_emitter *e = yam_emitter_new(a);
+    yam_emitter_set_style(e, opts);
+    const yam_event *evt;
 
     while (yam_parse_next(p, &evt) == YAM_OK) {
-        yam_emit(e, &evt);
-        if (evt.type == YAM_EVT_STREAM_END) break;
+        yam_emit(e, evt);
+        if (evt->type == YAM_EVT_STREAM_END) break;
     }
 
     yam_str out = yam_emitter_output(e);
@@ -58,7 +59,7 @@ static bool str_eq(yam_str s, const char *expected) {
 static void test_flow_simple(void) {
     printf("test_flow_simple:\n");
     yam_arena *a = yam_arena_new(4096);
-    yam_emit_opts opts = {YAM_EMIT_FLOW, 2, 80, true};
+    yam_emit_style opts = YAM_EMIT_FLOW;
 
     yam_str out = roundtrip("key: value\n", opts, a);
     ASSERT(str_contains(out, "{"), "flow mapping has {");
@@ -74,7 +75,7 @@ static void test_flow_simple(void) {
 static void test_minimal_simple(void) {
     printf("test_minimal_simple:\n");
     yam_arena *a = yam_arena_new(4096);
-    yam_emit_opts opts = {YAM_EMIT_MINIMAL, 2, 80, true};
+    yam_emit_style opts = YAM_EMIT_MINIMAL;
 
     yam_str out = roundtrip("key: value\n", opts, a);
     ASSERT(str_contains(out, "{"), "minimal has {");
@@ -90,7 +91,7 @@ static void test_minimal_simple(void) {
 static void test_block_mapping(void) {
     printf("test_block_mapping:\n");
     yam_arena *a = yam_arena_new(4096);
-    yam_emit_opts opts = YAM_EMIT_OPTS_DEFAULT;
+    yam_emit_style opts = YAM_EMIT_BLOCK;
 
     yam_str out = roundtrip("name: Alice\nage: \"30\"\n", opts, a);
     ASSERT(str_contains(out, "name: Alice"), "block map key: value");
@@ -105,7 +106,7 @@ static void test_block_mapping(void) {
 static void test_block_sequence(void) {
     printf("test_block_sequence:\n");
     yam_arena *a = yam_arena_new(4096);
-    yam_emit_opts opts = YAM_EMIT_OPTS_DEFAULT;
+    yam_emit_style opts = YAM_EMIT_BLOCK;
 
     yam_str out = roundtrip("- one\n- two\n- three\n", opts, a);
     ASSERT(str_contains(out, "- one"), "seq item one");
@@ -120,7 +121,7 @@ static void test_block_sequence(void) {
 static void test_nested_map_in_seq(void) {
     printf("test_nested_map_in_seq:\n");
     yam_arena *a = yam_arena_new(4096);
-    yam_emit_opts opts = YAM_EMIT_OPTS_DEFAULT;
+    yam_emit_style opts = YAM_EMIT_BLOCK;
 
     yam_str out = roundtrip("- name: Alice\n  age: \"30\"\n- name: Bob\n", opts, a);
     ASSERT(str_contains(out, "- name:"), "compact mapping in sequence");
@@ -135,7 +136,7 @@ static void test_nested_map_in_seq(void) {
 static void test_seq_in_map(void) {
     printf("test_seq_in_map:\n");
     yam_arena *a = yam_arena_new(4096);
-    yam_emit_opts opts = YAM_EMIT_OPTS_DEFAULT;
+    yam_emit_style opts = YAM_EMIT_BLOCK;
 
     yam_str out = roundtrip("items:\n  - one\n  - two\n", opts, a);
     ASSERT(str_contains(out, "items:"), "has key");
@@ -150,7 +151,7 @@ static void test_seq_in_map(void) {
 static void test_flow_in_block(void) {
     printf("test_flow_in_block:\n");
     yam_arena *a = yam_arena_new(4096);
-    yam_emit_opts opts = YAM_EMIT_OPTS_DEFAULT;
+    yam_emit_style opts = YAM_EMIT_BLOCK;
 
     yam_str out = roundtrip("key: [a, b, c]\n", opts, a);
     ASSERT(str_contains(out, "["), "has [");
@@ -164,7 +165,7 @@ static void test_flow_in_block(void) {
 static void test_scalar_quoting(void) {
     printf("test_scalar_quoting:\n");
     yam_arena *a = yam_arena_new(4096);
-    yam_emit_opts opts = YAM_EMIT_OPTS_DEFAULT;
+    yam_emit_style opts = YAM_EMIT_BLOCK;
 
     /* plain scalars stay plain, so they keep their type on reload */
     yam_str out = roundtrip("port: 8080\nok: true\nnone:\nz: ~\n", opts, a);
@@ -184,7 +185,7 @@ static void test_scalar_quoting(void) {
 
     /* an empty (null) entry in a flow sequence is written as ~ */
     yam_arena_reset(a);
-    out = roundtrip("- a\n-\n", (yam_emit_opts){YAM_EMIT_FLOW, 2, 80, true}, a);
+    out = roundtrip("- a\n-\n", YAM_EMIT_FLOW, a);
     ASSERT(str_eq(out, "[a, ~]\n"), "null flow sequence entry is ~");
 
     /* syntax still forces quotes */
@@ -200,7 +201,7 @@ static void test_scalar_quoting(void) {
 static void test_doc_markers(void) {
     printf("test_doc_markers:\n");
     yam_arena *a = yam_arena_new(4096);
-    yam_emit_opts opts = YAM_EMIT_OPTS_DEFAULT;
+    yam_emit_style opts = YAM_EMIT_BLOCK;
 
     yam_str out = roundtrip("---\nkey: value\n...\n", opts, a);
     ASSERT(str_contains(out, "---"), "has doc start");
@@ -214,7 +215,7 @@ static void test_doc_markers(void) {
 static void test_anchor_alias(void) {
     printf("test_anchor_alias:\n");
     yam_arena *a = yam_arena_new(4096);
-    yam_emit_opts opts = YAM_EMIT_OPTS_DEFAULT;
+    yam_emit_style opts = YAM_EMIT_BLOCK;
 
     yam_str out = roundtrip("a: &anchor hello\nb: *anchor\n", opts, a);
     ASSERT(str_contains(out, "&anchor"), "has anchor");
@@ -228,7 +229,7 @@ static void test_anchor_alias(void) {
 static void test_tags(void) {
     printf("test_tags:\n");
     yam_arena *a = yam_arena_new(4096);
-    yam_emit_opts opts = YAM_EMIT_OPTS_DEFAULT;
+    yam_emit_style opts = YAM_EMIT_BLOCK;
 
     yam_str out = roundtrip("!!str true\n", opts, a);
     ASSERT(str_contains(out, "!!str"), "has !!str tag");
@@ -241,7 +242,7 @@ static void test_tags(void) {
 static void test_empty_collections(void) {
     printf("test_empty_collections:\n");
     yam_arena *a = yam_arena_new(4096);
-    yam_emit_opts opts = YAM_EMIT_OPTS_DEFAULT;
+    yam_emit_style opts = YAM_EMIT_BLOCK;
 
     yam_str out = roundtrip("map: {}\nseq: []\n", opts, a);
     ASSERT(str_contains(out, "{}"), "empty map as {}");
@@ -252,7 +253,7 @@ static void test_empty_collections(void) {
 
 /* ── Test: Round-trip (parse → emit → re-parse → compare) ── */
 
-static bool events_match(const char *yaml, yam_emit_opts opts) {
+static bool events_match(const char *yaml, yam_emit_style opts) {
     yam_arena *a1 = yam_arena_new(8192);
     yam_arena *a2 = yam_arena_new(8192);
 
@@ -261,14 +262,17 @@ static bool events_match(const char *yaml, yam_emit_opts opts) {
     yam_event evts1[256];
     int n1 = 0;
     while (n1 < 256) {
-        if (yam_parse_next(p1, &evts1[n1]) != YAM_OK) break;
+        const yam_event *ev;
+        if (yam_parse_next(p1, &ev) != YAM_OK) break;
+        evts1[n1] = *ev;
         if (evts1[n1].type == YAM_EVT_STREAM_END) { n1++; break; }
         n1++;
     }
     yam_parser_free(p1);
 
     /* Emit */
-    yam_emitter *e = yam_emitter_new(opts, a1);
+    yam_emitter *e = yam_emitter_new(a1);
+    yam_emitter_set_style(e, opts);
     for (int i = 0; i < n1; i++) yam_emit(e, &evts1[i]);
     yam_str out = yam_emitter_output(e);
     yam_emitter_free(e);
@@ -280,7 +284,9 @@ static bool events_match(const char *yaml, yam_emit_opts opts) {
     yam_event evts2[256];
     int n2 = 0;
     while (n2 < 256) {
-        if (yam_parse_next(p2, &evts2[n2]) != YAM_OK) break;
+        const yam_event *ev;
+        if (yam_parse_next(p2, &ev) != YAM_OK) break;
+        evts2[n2] = *ev;
         if (evts2[n2].type == YAM_EVT_STREAM_END) { n2++; break; }
         n2++;
     }
@@ -326,9 +332,9 @@ static bool events_match(const char *yaml, yam_emit_opts opts) {
 
 static void test_roundtrip(void) {
     printf("test_roundtrip:\n");
-    yam_emit_opts block = YAM_EMIT_OPTS_DEFAULT;
-    yam_emit_opts flow = {YAM_EMIT_FLOW, 2, 80, true};
-    yam_emit_opts minimal = {YAM_EMIT_MINIMAL, 2, 80, true};
+    yam_emit_style block = YAM_EMIT_BLOCK;
+    yam_emit_style flow = YAM_EMIT_FLOW;
+    yam_emit_style minimal = YAM_EMIT_MINIMAL;
 
     /* simple mapping */
     ASSERT(events_match("name: Alice\nage: \"30\"\n", block), "rt: block mapping");
@@ -385,7 +391,7 @@ static void test_block_value_placement(void) {
         "a: &x\n  b: c\n"
         "k: [one, two]\n"
         "s: !!seq\n- u\n- &m\n  v: w\n";
-    yam_str out = roundtrip(yaml, YAM_EMIT_OPTS_DEFAULT, a);
+    yam_str out = roundtrip(yaml, YAM_EMIT_BLOCK, a);
     ASSERT(str_eq(out,
         "a: &x\n  b: c\n"
         "k: [one, two]\n"
@@ -394,19 +400,71 @@ static void test_block_value_placement(void) {
 
     /* the output parses back */
     yam_parser *p = yam_parser_new(out.data, out.len, a);
-    yam_event evt;
+    const yam_event *evt;
     yam_status st;
-    while ((st = yam_parse_next(p, &evt)) == YAM_OK && evt.type != YAM_EVT_STREAM_END)
+    while ((st = yam_parse_next(p, &evt)) == YAM_OK && evt->type != YAM_EVT_STREAM_END)
         ;
     ASSERT(st == YAM_OK, "emitted block output reparses");
     yam_parser_free(p);
     yam_arena_free(a);
 }
 
+/* Building output with the event functions, and the option setters */
+static void test_build_events(void) {
+    printf("test_build_events:\n");
+    yam_arena *a = yam_arena_new(4096);
+    yam_emitter *e = yam_emitter_new(a);
+    yam_emitter_set_indent(e, 4);
+
+    yam_emit_stream_start(e);
+    yam_emit_document_start(e, true);
+    yam_emit_mapping_start(e, YAM_STR_NULL, YAM_STR_NULL, false);
+    yam_emit_scalar(e, YAM_STR_LIT("name"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_NULL);
+    yam_emit_scalar(e, YAM_STR_LIT("yam"), YAM_SCALAR_PLAIN, YAM_STR_LIT("n"), YAM_STR_NULL);
+    yam_emit_scalar(e, YAM_STR_LIT("port"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_NULL);
+    yam_emit_scalar(e, YAM_STR_LIT("8080"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_TAG_STR);
+    yam_emit_scalar(e, YAM_STR_LIT("list"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_NULL);
+    yam_emit_sequence_start(e, YAM_STR_NULL, YAM_STR_NULL, false);
+    yam_emit_alias(e, YAM_STR_LIT("n"));
+    yam_emit_scalar(e, YAM_STR_LIT("two words"), YAM_SCALAR_SINGLE_QUOTED, YAM_STR_NULL, YAM_STR_NULL);
+    yam_emit_sequence_end(e);
+    yam_emit_scalar(e, YAM_STR_LIT("flow"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_NULL);
+    yam_emit_sequence_start(e, YAM_STR_NULL, YAM_STR_NULL, true);
+    yam_emit_scalar(e, YAM_STR_LIT("a"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_NULL);
+    yam_emit_sequence_end(e);
+    yam_emit_mapping_end(e);
+    yam_emit_document_end(e, true);
+    ASSERT(yam_emit_stream_end(e) == YAM_OK, "event functions succeed");
+
+    yam_str out = yam_emitter_output(e);
+    ASSERT(str_eq(out,
+        "name: &n yam\n"
+        "port: !!str \"8080\"\n"
+        "list:\n"
+        "    - *n\n"
+        "    - 'two words'\n"
+        "flow: [a]\n"), "built document");
+
+    yam_emitter_free(e);
+    e = yam_emitter_new(a);
+    yam_emitter_set_style(e, YAM_EMIT_MINIMAL);
+    yam_emit_stream_start(e);
+    yam_emit_document_start(e, true);
+    yam_emit_sequence_start(e, YAM_STR_NULL, YAM_STR_NULL, false);
+    yam_emit_scalar(e, YAM_STR_LIT("x"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_NULL);
+    yam_emit_scalar(e, YAM_STR_LIT("y"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_NULL);
+    yam_emit_sequence_end(e);
+    yam_emit_document_end(e, true);
+    yam_emit_stream_end(e);
+    ASSERT(str_eq(yam_emitter_output(e), "[x,y]\n"), "minimal style via setter");
+    yam_emitter_free(e);
+    yam_arena_free(a);
+}
+
 static void test_deep_block(void) {
     printf("test_deep_block:\n");
     yam_arena *a = yam_arena_new(4096);
-    yam_emit_opts opts = YAM_EMIT_OPTS_DEFAULT;
+    yam_emit_style opts = YAM_EMIT_BLOCK;
 
     yam_str out = roundtrip("a:\n  b:\n    c: deep\n", opts, a);
     ASSERT(str_contains(out, "a:"), "has a:");
@@ -433,6 +491,7 @@ int main(void) {
     test_empty_collections();
     test_deep_block();
     test_block_value_placement();
+    test_build_events();
     test_roundtrip();
 
     printf("\n--- Emitter tests: %d / %d passed ---\n", tests_passed, tests_run);

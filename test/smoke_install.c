@@ -28,10 +28,10 @@ int main(void) {
     if (!p) { fprintf(stderr, "parser new failed\n"); yam_arena_free(a); return 2; }
 
     int scalars = 0;
-    yam_event e;
+    const yam_event *e;
     while (yam_parse_next(p, &e) == YAM_OK) {
-        if (e.type == YAM_EVT_STREAM_END) break;
-        if (e.type == YAM_EVT_SCALAR) scalars++;
+        if (e->type == YAM_EVT_STREAM_END) break;
+        if (e->type == YAM_EVT_SCALAR) scalars++;
     }
 
     yam_parser_free(p);

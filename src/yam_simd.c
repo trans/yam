@@ -14,8 +14,8 @@
  * where STT_GNU_IFUNC is unavailable.
  */
 
-#include "yam/yam_simd.h"
-#include "yam/yam_chars.h"
+#include "yam_simd.h"
+#include "yam_chars.h"
 
 #include <stdint.h>
 
