@@ -124,7 +124,10 @@ static void skip_break(yam_scanner *s) {
     s->col = 1;
 }
 
-static void skip_blanks_and_comments(yam_scanner *s) {
+/* Skip whitespace, line breaks and comments. Returns false if a '#' that
+ * would start a comment directly follows the previous token: comments must
+ * be separated from other tokens by whitespace. */
+static bool skip_blanks_and_comments(yam_scanner *s) {
     for (;;) {
         /* skip spaces and tabs */
         size_t skip = yam_skip_blanks(BUF_AT(s), REMAINING(s));
@@ -132,6 +135,8 @@ static void skip_blanks_and_comments(yam_scanner *s) {
 
         /* comment? skip to end of line */
         if (PEEK(s) == '#') {
+            if (s->pos > 0 && !yam_is_blank_or_break((uint8_t)s->buf[s->pos - 1]))
+                return false;
             size_t to_break = yam_scan_to_break(BUF_AT(s), REMAINING(s));
             advance_cols(s, to_break);
         }
@@ -147,6 +152,7 @@ static void skip_blanks_and_comments(yam_scanner *s) {
 
         break;
     }
+    return true;
 }
 
 /* ── Indent management ───────────────────────────────────── */
@@ -841,7 +847,8 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
     }
 
     /* skip whitespace and comments */
-    skip_blanks_and_comments(s);
+    if (!skip_blanks_and_comments(s))
+        SCAN_ERROR(s, "comment must be separated from other tokens by whitespace");
 
     /* stream end */
     if (AT_END(s)) {
@@ -1022,8 +1029,11 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
         }
 
         /* skip any trailing blanks and comment on indicator line */
+        size_t hdr_blanks = s->pos;
         while (!AT_END(s) && yam_is_blank(PEEK(s))) advance(s, 1);
         if (!AT_END(s) && PEEK(s) == '#') {
+            if (s->pos == hdr_blanks)
+                SCAN_ERROR(s, "comment must be separated from other tokens by whitespace");
             while (!AT_END(s) && !yam_is_break(PEEK(s))) advance(s, 1);
         }
         if (!AT_END(s) && !yam_is_break(PEEK(s))) SCAN_ERROR(s, "invalid block scalar indicator");
