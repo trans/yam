@@ -306,12 +306,16 @@ yam_status  yam_parse_next(yam_parser *p, yam_event *evt);
 /** Set a tag schema for automatic tag resolution on scalars. */
 void        yam_parser_set_schema(yam_parser *p, const yam_schema *schema);
 
-/** Enable/disable merge key (@c <<) expansion. Disabled by default. */
+/** Enable/disable merge key (@c <<) expansion. Disabled by default.
+ *  A merge value must be a mapping, an alias to one, or a sequence of
+ *  those; anything else is a YAM_ERR_PARSE. */
 void        yam_parser_set_merge(yam_parser *p, bool enable);
 
 /** Enable/disable alias resolution (inline expansion of @c *alias
- *  references). Disabled by default. Cyclic aliases are kept as
- *  YAM_EVT_ALIAS events. */
+ *  references). Disabled by default. An alias refers to the most recent
+ *  anchor of that name before it in the same document. Cyclic aliases,
+ *  and aliases with no preceding anchor, are kept as YAM_EVT_ALIAS
+ *  events. */
 void        yam_parser_set_resolve(yam_parser *p, bool enable);
 
 /** Set the maximum number of events before the parser stops with an error.

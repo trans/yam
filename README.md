@@ -201,8 +201,10 @@ production:
 ```
 
 With merge enabled, `production` expands to contain `adapter`, `host`, and
-`database` as direct entries. Explicit keys override merged ones. Merge with
-a sequence of aliases merges all of them (first wins on conflicts). Quoted
+`database` as direct entries. Explicit keys override merged ones. The merge
+value can be an alias to a mapping, an inline mapping (`<<: {k: v}`), or a
+sequence of those, which merges all of them (first wins on conflicts). Any
+other value, or an alias to an undefined anchor, is a parse error. Quoted
 `"<<"` is treated as a normal key.
 
 ## Alias Resolution
@@ -214,9 +216,12 @@ emitting `ALIAS` events:
 yam_parser_set_resolve(parser, true);
 ```
 
-Scalar, mapping, and sequence aliases are all expanded. Circular and unknown
-references are kept as `ALIAS` events (no error, no infinite loop). Combines
-with merge keys when both are enabled.
+Scalar, mapping, and sequence aliases are all expanded. An alias refers to
+the most recent anchor of that name *before* it in the same document, so a
+reused anchor name works as in the spec. Circular references, and aliases
+with no preceding anchor (undefined, forward, or from an earlier document),
+are kept as `ALIAS` events (no error, no infinite loop). Combines with merge
+keys when both are enabled.
 
 ## Safety Limits
 

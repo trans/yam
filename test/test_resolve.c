@@ -346,6 +346,40 @@ static void test_billion_laughs(void) {
     }
 }
 
+/* ── Test: Alias binds to the preceding definition ──────── */
+
+/* An alias refers to the most recent anchor with its name *before* it in
+ * the same document: not a later redefinition, not a forward reference,
+ * not an anchor from an earlier document. */
+static void test_alias_binding(void) {
+    printf("test_alias_binding:\n");
+
+    /* a: &x 1, b: *x, c: &x 2, d: *x  →  b is 1, d is 2 */
+    event_list el = parse_with("a: &x 1\nb: *x\nc: &x 2\nd: *x\n", true, false);
+    ASSERT(!has_alias(&el), "both aliases resolved");
+    ASSERT(count_scalar(&el, "1") == 2, "b resolves to the first &x");
+    ASSERT(count_scalar(&el, "2") == 2, "d resolves to the second &x");
+
+    /* forward reference stays an alias */
+    el = parse_with("a: *x\nb: &x 1\n", true, false);
+    ASSERT(has_alias(&el), "forward reference is not resolved");
+
+    /* anchors don't carry into the next document */
+    el = parse_with("--- &x 1\n--- *x\n", true, false);
+    ASSERT(has_alias(&el), "alias doesn't resolve across documents");
+
+    /* original anchor names still point into the input */
+    const char *yaml = "a: &name v\nb: *name\n";
+    el = parse_with(yaml, true, false);
+    bool into_input = false;
+    for (int i = 0; i < el.len; i++)
+        if (el.events[i].anchor.data)
+            into_input = el.events[i].anchor.data >= yaml &&
+                         el.events[i].anchor.data < yaml + strlen(yaml) &&
+                         el.events[i].anchor.len == 4;
+    ASSERT(into_input, "anchor names still point into the input");
+}
+
 /* ── Main ────────────────────────────────────────────────── */
 
 int main(void) {
@@ -363,6 +397,7 @@ int main(void) {
     test_circular();
     test_self_reference();
     test_billion_laughs();
+    test_alias_binding();
 
     printf("\n--- Resolve tests: %d / %d passed ---\n", tests_passed, tests_run);
     if (tests_failed > 0) printf("    %d FAILED\n", tests_failed);

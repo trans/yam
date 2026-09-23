@@ -152,6 +152,9 @@ struct yam_parser {
     yam_status   scan_error;      /* last scanner error (for incremental path) */
     int          scan_error_out;  /* out_len when scan_error was hit */
 
+    /* original anchor names by binding serial (see bind_anchors) */
+    yam_str *bound_names;
+
     /* flow-as-key lookahead cache (see flow_is_block_key) */
     bool    fk_valid;
     size_t  fk_lo, fk_hi;   /* byte range of the last scanned collection */
@@ -2049,8 +2052,9 @@ static void kset_free(key_set *ks) {
 
 static bool kset_contains(const key_set *ks, yam_str key) {
     for (int i = 0; i < ks->len; i++) {
+        /* empty keys may have NULL data: don't pass it to memcmp */
         if (ks->keys[i].len == key.len &&
-            memcmp(ks->keys[i].data, key.data, key.len) == 0)
+            (key.len == 0 || memcmp(ks->keys[i].data, key.data, key.len) == 0))
             return true;
     }
     return false;
@@ -2118,35 +2122,46 @@ static void merge_from_mapping(const yam_event *events, int evt_len,
     }
 }
 
-/* Process a single merge value (ALIAS or SEQUENCE of aliases) */
-static void process_merge_value(const yam_event *events, int evt_len,
-                                int val_start, int val_end,
+/* Merge one merge source: an inline mapping or an alias to a mapping.
+ * Returns an error message, or NULL. */
+static const char *merge_source(const yam_event *events, int evt_len, int pos,
                                 merge_anchor_table *anchors,
                                 evt_buf *out, key_set *seen) {
-    if (events[val_start].type == YAM_EVT_ALIAS) {
-        /* <<: *alias */
-        merge_anchor *a = atbl_lookup(anchors, events[val_start].value);
-        if (a && events[a->start].type == YAM_EVT_MAPPING_START) {
-            merge_from_mapping(events, evt_len, a->start, a->end, out, seen);
-        }
-    } else if (events[val_start].type == YAM_EVT_SEQUENCE_START) {
-        /* <<: [*a, *b, ...] */
-        int pos = val_start + 1;
-        int seq_end = val_end - 1; /* SEQUENCE_END */
-        while (pos < seq_end) {
-            if (events[pos].type == YAM_EVT_ALIAS) {
-                merge_anchor *a = atbl_lookup(anchors, events[pos].value);
-                if (a && events[a->start].type == YAM_EVT_MAPPING_START) {
-                    merge_from_mapping(events, evt_len, a->start, a->end,
-                                       out, seen);
-                }
-                pos++;
-            } else {
-                pos = node_end(events, evt_len, pos);
-            }
-        }
+    if (events[pos].type == YAM_EVT_MAPPING_START) {
+        merge_from_mapping(events, evt_len, pos, node_end(events, evt_len, pos),
+                           out, seen);
+        return NULL;
     }
-    /* other value types (scalar, mapping) — silently ignored */
+    if (events[pos].type == YAM_EVT_ALIAS) {
+        merge_anchor *a = atbl_lookup(anchors, events[pos].value);
+        if (!a) return "merge key refers to an undefined anchor";
+        if (events[a->start].type != YAM_EVT_MAPPING_START)
+            return "merge key must refer to a mapping";
+        merge_from_mapping(events, evt_len, a->start, a->end, out, seen);
+        return NULL;
+    }
+    return "merge value must be a mapping or a sequence of mappings";
+}
+
+/* Process a merge key's value: a mapping, an alias to one, or a sequence
+ * of those (earlier sources win on conflicts). Returns an error message,
+ * or NULL. */
+static const char *process_merge_value(const yam_event *events, int evt_len,
+                                       int val_start, int val_end,
+                                       merge_anchor_table *anchors,
+                                       evt_buf *out, key_set *seen) {
+    if (events[val_start].type != YAM_EVT_SEQUENCE_START)
+        return merge_source(events, evt_len, val_start, anchors, out, seen);
+
+    /* <<: [*a, {k: v}, ...] */
+    int pos = val_start + 1;
+    int seq_end = val_end - 1; /* SEQUENCE_END */
+    while (pos < seq_end) {
+        const char *err = merge_source(events, evt_len, pos, anchors, out, seen);
+        if (err) return err;
+        pos = node_end(events, evt_len, pos);
+    }
+    return NULL;
 }
 
 /* Event budget for merge/alias expansion. Expansion can grow the stream
@@ -2263,9 +2278,17 @@ static yam_status resolve_merges(yam_parser *p) {
                     int val_end = node_end(p->events, p->evt_len, key_end);
 
                     if (is_merge_key(&p->events[key_start])) {
-                        process_merge_value(p->events, p->evt_len,
-                                            val_start, val_end,
-                                            &anchors, &out, &seen);
+                        const char *err = process_merge_value(
+                            p->events, p->evt_len, val_start, val_end,
+                            &anchors, &out, &seen);
+                        if (err) {
+                            kset_free(&seen);
+                            atbl_free(&anchors);
+                            ebuf_free(&out);
+                            snprintf(p->error_msg, sizeof(p->error_msg), "%s", err);
+                            p->error_mark = p->events[key_start].start;
+                            return YAM_ERR_PARSE;
+                        }
                     }
                     pos = val_end;
                 }
@@ -2302,6 +2325,98 @@ static yam_status resolve_merges(yam_parser *p) {
 
     return YAM_OK;
     #undef MAX_MERGE_PASSES
+}
+
+/* ── Anchor binding ──────────────────────────────────────── */
+
+/* An alias refers to the most recent node with that anchor *before* it in
+ * the same document (YAML 1.2 §3.2.2.2). Anchor names may be reused, so
+ * before merge/alias expansion every anchor definition gets a unique
+ * internal name ("name\0<n>") and each alias is pointed at the definition
+ * it refers to. The name-based expansion code below then resolves exactly
+ * the right node. An alias with no preceding definition (undefined, a
+ * forward reference, or one from an earlier document) keeps its original
+ * name, which matches no internal name, and stays an unresolved alias.
+ * unbind_anchors() restores the original names afterwards, pointing back
+ * into the input as before; original names never contain '\0' (the
+ * scanner stops names at NUL). */
+
+typedef struct { yam_str name; yam_str bound; } anchor_slot;
+
+static uint32_t name_hash(yam_str s) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < s.len; i++) h = (h ^ (uint8_t)s.data[i]) * 16777619u;
+    return h;
+}
+
+static yam_status bind_anchors(yam_parser *p) {
+    int nanchors = 0;
+    for (int i = 0; i < p->evt_len; i++)
+        if (p->events[i].anchor.data && p->events[i].anchor.len) nanchors++;
+    if (nanchors == 0) return YAM_OK;
+
+    size_t cap = 16;
+    while (cap < (size_t)nanchors * 2) cap *= 2;
+    anchor_slot *tab = calloc(cap, sizeof *tab);
+    free(p->bound_names);
+    p->bound_names = malloc(((size_t)nanchors + 1) * sizeof *p->bound_names);
+    if (!tab || !p->bound_names) { free(tab); return YAM_ERR_MEMORY; }
+
+    unsigned serial = 0;
+    for (int i = 0; i < p->evt_len; i++) {
+        yam_event *e = &p->events[i];
+        if (e->type == YAM_EVT_DOC_START) {
+            memset(tab, 0, cap * sizeof *tab);   /* anchors are per document */
+            continue;
+        }
+        /* an anchored node is defined at its start, so aliases inside it
+         * (recursive references) bind to it too */
+        if (e->anchor.data && e->anchor.len) {
+            char *u = yam_arena_alloc(p->arena, e->anchor.len + 12, 1);
+            if (!u) { free(tab); return YAM_ERR_MEMORY; }
+            memcpy(u, e->anchor.data, e->anchor.len);
+            p->bound_names[++serial] = e->anchor;
+            int n = snprintf(u + e->anchor.len, 12, "%c%u", '\0', serial);
+            yam_str bound = { u, e->anchor.len + (size_t)n };
+            size_t h = name_hash(e->anchor) & (cap - 1);
+            while (tab[h].name.data &&
+                   !(tab[h].name.len == e->anchor.len &&
+                     memcmp(tab[h].name.data, e->anchor.data, e->anchor.len) == 0))
+                h = (h + 1) & (cap - 1);
+            tab[h].name = e->anchor;
+            tab[h].bound = bound;
+            e->anchor = bound;
+        }
+        if (e->type == YAM_EVT_ALIAS) {
+            size_t h = name_hash(e->value) & (cap - 1);
+            while (tab[h].name.data) {
+                if (tab[h].name.len == e->value.len &&
+                    memcmp(tab[h].name.data, e->value.data, e->value.len) == 0) {
+                    e->value = tab[h].bound;
+                    break;
+                }
+                h = (h + 1) & (cap - 1);
+            }
+        }
+    }
+    free(tab);
+    return YAM_OK;
+}
+
+static void unbind_name(const yam_parser *p, yam_str *s) {
+    if (!s->data) return;
+    const char *z = memchr(s->data, '\0', s->len);
+    if (z) *s = p->bound_names[strtoul(z + 1, NULL, 10)];
+}
+
+static void unbind_anchors(yam_parser *p) {
+    if (!p->bound_names) return;
+    for (int i = 0; i < p->evt_len; i++) {
+        unbind_name(p, &p->events[i].anchor);
+        if (p->events[i].type == YAM_EVT_ALIAS) unbind_name(p, &p->events[i].value);
+    }
+    free(p->bound_names);
+    p->bound_names = NULL;
 }
 
 /* ── Alias resolution ────────────────────────────────────── */
@@ -4021,6 +4136,10 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
         if (!p->stream_started) {
             yam_status st = parse_stream(p);
             if (st != YAM_OK) return st;
+            if (p->merge_enabled || p->resolve_enabled) {
+                st = bind_anchors(p);
+                if (st != YAM_OK) return st;
+            }
             if (p->merge_enabled) {
                 st = resolve_merges(p);
                 if (st != YAM_OK) return st;
@@ -4029,6 +4148,8 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
                 st = resolve_aliases(p);
                 if (st != YAM_OK) return st;
             }
+            if (p->merge_enabled || p->resolve_enabled)
+                unbind_anchors(p);
             /* skip events already delivered during incremental phase */
             if (p->events_delivered > 0 && p->evt_cursor < p->events_delivered) {
                 p->evt_cursor = p->events_delivered;
@@ -4172,5 +4293,6 @@ void yam_parser_free(yam_parser *p) {
     free(p->frames);
     free(p->fk_keys);
     free(p->fk_stack);
+    free(p->bound_names);
     free(p);
 }

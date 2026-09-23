@@ -306,37 +306,76 @@ static void test_nested_merge(void) {
     ASSERT(find_key_value(&el, c_val, "x") > 0, "c has 'x' (from *a via *b)");
 }
 
-/* ── Test: Merge non-mapping (silently ignored) ──────────── */
+/* ── Test: Merge value that isn't a mapping ────────────────── */
 
+static yam_status parse_status(const char *yaml) {
+    yam_arena *a = yam_arena_new(4096);
+    yam_parser *p = yam_parser_new(yaml, strlen(yaml), a);
+    yam_parser_set_merge(p, true);
+    yam_event evt;
+    yam_status st;
+    while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
+           evt.type != YAM_EVT_STREAM_END && evt.type != YAM_EVT_NONE)
+        ;
+    yam_parser_free(p);
+    yam_arena_free(a);
+    return st;
+}
+
+/* A merge value must be a mapping, an alias to one, or a sequence of
+ * those; anything else used to be dropped silently and is now an error. */
 static void test_merge_non_mapping(void) {
     printf("test_merge_non_mapping:\n");
-    const char *yaml =
-        "scalar: &s hello\n"
-        "result:\n"
-        "  <<: *s\n"
-        "  x: 1\n";
+    ASSERT(parse_status("s: &s hello\nr:\n  <<: *s\n  x: 1\n") == YAM_ERR_PARSE,
+           "merging an alias to a scalar is an error");
+    ASSERT(parse_status("r:\n  <<: hello\n  x: 1\n") == YAM_ERR_PARSE,
+           "merging a scalar is an error");
+    ASSERT(parse_status("r:\n  <<: [hello]\n") == YAM_ERR_PARSE,
+           "merging a sequence of scalars is an error");
+    ASSERT(parse_status("r:\n  <<: *nope\n") == YAM_ERR_PARSE,
+           "merging an undefined anchor is an error");
+}
 
+/* ── Test: Inline mapping as merge value ───────────────────── */
+
+static void test_merge_inline(void) {
+    printf("test_merge_inline:\n");
+    const char *yaml =
+        "b: &b {y: 2}\n"
+        "r:\n"
+        "  <<: {x: 1, z: 9}\n"
+        "  z: 3\n"
+        "q:\n"
+        "  <<: [{w: 0}, *b]\n";
     event_list el = parse_yaml(yaml, true);
 
-    /* merge of non-mapping is silently ignored; result should just have x */
-    int result_val = find_key_value(&el, 0, "result");
-    ASSERT(result_val > 0, "found 'result'");
-    ASSERT(find_key_value(&el, result_val, "x") > 0, "has explicit 'x'");
+    int r = find_key_value(&el, 0, "r");
+    ASSERT(r > 0, "found 'r'");
+    ASSERT(find_key_value(&el, r, "x") > 0, "inline mapping merged");
+    int z = find_key_value(&el, r, "z");
+    ASSERT(z > 0 && el.events[z].value.len == 1 && el.events[z].value.data[0] == '3',
+           "explicit key overrides inline merge");
 
-    /* the hello scalar should NOT be injected into result */
-    int depth = 0;
-    int scalar_count = 0;
-    for (int i = result_val; i < el.len; i++) {
-        if (el.events[i].type == YAM_EVT_MAPPING_START) depth++;
-        if (el.events[i].type == YAM_EVT_MAPPING_END) {
-            depth--;
-            if (depth == 0) break;
-        }
-        if (depth == 1 && el.events[i].type == YAM_EVT_SCALAR)
-            scalar_count++;
-    }
-    /* should be exactly 2 scalars: "x" and "1" */
-    ASSERT(scalar_count == 2, "only explicit key-value in result");
+    int q = find_key_value(&el, 0, "q");
+    ASSERT(q > 0 && find_key_value(&el, q, "w") > 0, "inline mapping in merge list");
+    ASSERT(q > 0 && find_key_value(&el, q, "y") > 0, "alias in merge list");
+}
+
+/* ── Test: Merge uses the preceding definition of a reused anchor ── */
+
+static void test_merge_redefined_anchor(void) {
+    printf("test_merge_redefined_anchor:\n");
+    const char *yaml =
+        "a: &m {k: first}\n"
+        "r:\n"
+        "  <<: *m\n"
+        "b: &m {k: second}\n";
+    event_list el = parse_yaml(yaml, true);
+    int r = find_key_value(&el, 0, "r");
+    int k = r > 0 ? find_key_value(&el, r, "k") : -1;
+    ASSERT(k > 0 && el.events[k].value.len == 5 &&
+           memcmp(el.events[k].value.data, "first", 5) == 0,
+           "merge uses the anchor defined before it");
 }
 
 /* ── Test: Opt-in behavior ───────────────────────────────── */
@@ -471,6 +510,8 @@ int main(void) {
     test_quoted_not_merge();
     test_nested_merge();
     test_merge_non_mapping();
+    test_merge_inline();
+    test_merge_redefined_anchor();
     test_opt_in();
     test_deep_values();
     test_empty_merge();
