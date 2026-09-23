@@ -1284,6 +1284,15 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
         return YAM_OK;
     }
 
+    /* in flow context a plain scalar can't start with '-' unless a safe
+     * character follows ('-a' is fine; '- ', '-,' and '-]' are not) */
+    if (c == '-' && s->flow_level > 0) {
+        uint8_t nc = PEEK_AT(s, 1);
+        if (nc == 0 || yam_is_blank_or_break(nc) || nc == ',' || nc == '[' ||
+            nc == ']' || nc == '{' || nc == '}')
+            SCAN_ERROR(s, "block sequence entry not allowed in flow context");
+    }
+
     /* plain scalar — the common case, SIMD-accelerated */
     return scan_plain_scalar(s, tok);
 }

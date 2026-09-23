@@ -517,6 +517,10 @@ static yam_status parse_flow_sequence(yam_parser *p) {
             return YAM_OK;
         }
 
+        /* comma with no entry before it: [ , a ] or [ a, , b ] */
+        if (tok_type(p) == YAM_TOK_FLOW_ENTRY)
+            PARSE_ERROR(p, "unexpected ',' in flow sequence");
+
         /* check for explicit key ? — starts a flow pair */
         if (tok_type(p) == YAM_TOK_BLOCK_MAP_KEY) {
             /* explicit key in flow sequence → flow pair (implicit mapping) */
@@ -654,6 +658,10 @@ static yam_status parse_flow_mapping(yam_parser *p) {
             pop_ctx(p);
             return YAM_OK;
         }
+
+        /* comma with no entry before it: { , a: b } */
+        if (tok_type(p) == YAM_TOK_FLOW_ENTRY)
+            PARSE_ERROR(p, "unexpected ',' in flow mapping");
 
         /* parse key */
         if (tok_type(p) == YAM_TOK_BLOCK_MAP_KEY) {
@@ -2741,6 +2749,10 @@ static yam_status parser_step_flow(yam_parser *p) {
             return YAM_OK;
         }
 
+        /* comma with no entry before it: { , a: b } */
+        if (tt == YAM_TOK_FLOW_ENTRY)
+            PARSE_ERROR(p, "unexpected ',' in flow mapping");
+
         /* explicit key: ? */
         if (tt == YAM_TOK_BLOCK_MAP_KEY) {
             consume_token(p);
@@ -2924,12 +2936,9 @@ static yam_status parser_step_flow(yam_parser *p) {
             return YAM_OK;
         }
 
-        /* comma: empty entry */
-        if (tt == YAM_TOK_FLOW_ENTRY) {
-            consume_token(p);
-            /* stay in LOOP — next iteration handles the entry */
-            return YAM_OK;
-        }
+        /* comma with no entry before it: [ , a ] or [ a, , b ] */
+        if (tt == YAM_TOK_FLOW_ENTRY)
+            PARSE_ERROR(p, "unexpected ',' in flow sequence");
 
         PARSE_ERROR(p, "unexpected token in flow sequence");
     }
