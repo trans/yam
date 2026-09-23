@@ -34,6 +34,7 @@ struct yam_scanner {
     /* input */
     const char *buf;
     size_t      len;
+    size_t      begin;  /* where the text starts: 3 past a UTF-8 BOM, else 0 */
 
     /* cursor */
     size_t      pos;
@@ -171,7 +172,7 @@ ALWAYS_INLINE const char *skip_blanks_and_comments(yam_scanner *s) {
 
         /* comment? skip to end of line */
         if (PEEK(s) == '#') {
-            if (s->pos > 0 && !yam_is_blank_or_break((uint8_t)s->buf[s->pos - 1]))
+            if (s->pos > s->begin && !yam_is_blank_or_break((uint8_t)s->buf[s->pos - 1]))
                 return "comment must be separated from other tokens by whitespace";
             size_t to_break = yam_scan_to_break(BUF_AT(s), REMAINING(s));
             advance_cols(s, to_break);
@@ -263,7 +264,7 @@ static int classify_colon(yam_scanner *s) {
          * line; an implicit key's ':' never does */
         size_t k = s->pos;
         while (k > 0 && (s->buf[k - 1] == ' ' || s->buf[k - 1] == '\t')) k--;
-        if (k == 0 || s->buf[k - 1] == '\n' || s->buf[k - 1] == '\r') {
+        if (k == s->begin || s->buf[k - 1] == '\n' || s->buf[k - 1] == '\r') {
             s->explicit_key = false;
             return COLON_EXPLICIT;
         }
@@ -968,6 +969,14 @@ yam_scanner *yam_scanner_new(const char *input, size_t len, yam_arena *a) {
         .indicator_end        = SIZE_MAX,
         .arena = a,
     };
+
+    /* skip a UTF-8 byte order mark; offsets stay relative to the caller's
+     * buffer, and the text still starts at line 1, column 1 */
+    if (len >= 3 && (uint8_t)input[0] == 0xEF && (uint8_t)input[1] == 0xBB &&
+        (uint8_t)input[2] == 0xBF) {
+        s->begin = 3;
+        s->pos = 3;
+    }
 
     s->indents.cap  = INDENT_STACK_INIT;
     s->indents.len  = 0;

@@ -350,6 +350,35 @@ static void test_block_scalar_trailing_spaces(void) {
     }
 }
 
+/* ── UTF-8 byte order mark ─────────────────────────────────── */
+
+/* A leading BOM is skipped: it must not become part of the first key.
+ * Offsets stay relative to the caller's buffer. */
+static void test_bom(void) {
+    printf("test_bom:\n");
+    const char *cases[] = { "\xEF\xBB\xBFkey: v\n", "\xEF\xBB\xBF# c\nkey: v\n",
+                            "\xEF\xBB\xBF%YAML 1.2\n---\nkey: v\n" };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        yam_arena *a = yam_arena_new(4096);
+        yam_parser *p = yam_parser_new(cases[i], strlen(cases[i]), a);
+        yam_event evt;
+        yam_status st;
+        bool found = false;
+        while ((st = yam_parse_next(p, &evt)) == YAM_OK && evt.type != YAM_EVT_STREAM_END) {
+            if (evt.type == YAM_EVT_SCALAR && !found) {
+                found = true;
+                ASSERT(evt.value.len == 3 && memcmp(evt.value.data, "key", 3) == 0,
+                       "BOM is not part of the first key");
+                ASSERT(evt.value.data == cases[i] + evt.start.offset,
+                       "offsets are relative to the input buffer");
+            }
+        }
+        ASSERT(st == YAM_OK && found, "BOM-prefixed document parses");
+        yam_parser_free(p);
+        yam_arena_free(a);
+    }
+}
+
 /* ── Main ───────────────────────────────────────────────────── */
 
 int main(void) {
@@ -375,6 +404,7 @@ int main(void) {
 
     /* fuzzer regressions */
     test_block_scalar_trailing_spaces();
+    test_bom();
 
     printf("\n--- Error tests: %d / %d passed ---\n", tests_passed, tests_run);
     if (tests_failed > 0) printf("    %d FAILED\n", tests_failed);
