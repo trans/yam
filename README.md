@@ -2,12 +2,15 @@
 
 A YAML 1.2 parser and emitter written in C11. Fast, minimal, zero-copy.
 
-Features a SIMD-accelerated scanner (SSE4.2 / NEON with scalar fallback),
+Features a SIMD-accelerated scanner (SSE4.2 with scalar fallback),
 an event-based parser, an emitter with block/flow/minimal output styles,
 merge key expansion, alias resolution, file input, structured error messages,
-and an arena allocator. Zero failures on the
-[YAML Test Suite](https://github.com/yaml/yaml-test-suite) (396 of 402
-pass, 6 skipped — those cases lack expected output in the test suite itself).
+and an arena allocator. Against the
+[YAML Test Suite](https://github.com/yaml/yaml-test-suite), it produces the
+exact expected event stream for all 302 valid-YAML cases (6 more lack
+expected output in the suite itself). Error detection is less complete: of
+the 94 invalid-YAML cases, 19 are currently rejected and 75 are accepted
+leniently; these are tracked as known failures in the test runner.
 
 ## Build
 

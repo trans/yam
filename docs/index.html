@@ -405,7 +405,7 @@
         event-driven parsing, merge and alias support, and dependable error reporting.
       </p>
       <div class="stats">
-        <div class="stat"><strong>396/402</strong><span>Suite Passes</span></div>
+        <div class="stat"><strong>302/302</strong><span>Valid Suite Cases</span></div>
         <div class="stat"><strong>663</strong><span>Total Tests</span></div>
         <div class="stat"><strong>423 MB/s<sup>*</sup></strong><span>Scanner</span></div>
         <div class="stat"><strong>172 MB/s<sup>*</sup></strong><span>Parser Avg</span></div>
@@ -426,7 +426,7 @@ make bench        # scanner benchmark on your machine</code></pre>
       <div class="grid-3">
         <article class="tile">
           <h3>Scanner</h3>
-          <p>SIMD-accelerated tokenization (SSE4.2 and NEON with scalar fallback), producing a flat token stream.</p>
+          <p>SIMD-accelerated tokenization (SSE4.2 with scalar fallback), producing a flat token stream.</p>
         </article>
         <article class="tile">
           <h3>Parser</h3>
@@ -487,7 +487,7 @@ while (yam_parse_next(parser, &evt) == YAM_OK) {
         </article>
         <article class="tile">
           <h3>Test Status</h3>
-          <p>Passes 396 of 402 YAML Test Suite cases.<br/>(6 have no expected output).</p>
+          <p>Exact event streams for all 302 valid YAML Test Suite cases.<br/>Rejects 19 of 94 invalid cases (work in progress).</p>
           <p>Project test count: <strong>663 total tests, 0 failures</strong>.</p>
         </article>
       </div>

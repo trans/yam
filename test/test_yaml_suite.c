@@ -36,6 +36,7 @@ typedef struct {
 /* ── Stats ───────────────────────────────────────────────── */
 
 static int total = 0, passed = 0, failed = 0, skipped = 0, errors = 0;
+static int xfailed = 0, xpassed = 0;
 
 /* ── Unicode unescaping ──────────────────────────────────── */
 
@@ -496,6 +497,94 @@ static size_t format_event(const yam_event *evt, char *buf, size_t cap) {
 
 typedef enum { RESULT_PASS, RESULT_FAIL, RESULT_ERROR, RESULT_SKIP } test_result;
 
+/* Invalid-YAML tests (fail: true) that yam currently accepts instead of
+ * rejecting. They are reported as XFAIL rather than FAIL so the suite can
+ * gate regressions; once one is fixed the runner reports XPASS (and fails)
+ * until it is removed from this list. Keep the list shrinking. */
+static const char *known_accepted_invalid[] = {
+    "236B",
+    "2CMS",
+    "3HFZ",
+    "4EJS",
+    "4HVU",
+    "4JVG",
+    "5LLU",
+    "5U3A",
+    "62EZ",
+    "6S55",
+    "7LBH",
+    "7MNF",
+    "8XDJ",
+    "9C9N",
+    "9CWY",
+    "9HCY",
+    "9JBA",
+    "9KBC",
+    "9MAG",
+    "9MMA",
+    "B63P",
+    "BD7L",
+    "BF9H",
+    "C2SP",
+    "CTN5",
+    "CVW2",
+    "CXX2",
+    "D49Q",
+    "DK4H",
+    "DK95:1",
+    "DK95:6",
+    "DMG6",
+    "EW3V",
+    "G5U8",
+    "G7JE",
+    "G9HC",
+    "GDY7",
+    "GT5M",
+    "H7J7",
+    "H7TQ",
+    "HU3P",
+    "JKF3",
+    "JY7Z",
+    "LHL4",
+    "MUS6:0",
+    "MUS6:1",
+    "N4JP",
+    "P2EQ",
+    "QB6E",
+    "QLJ7",
+    "RHX7",
+    "S98Z",
+    "SF5V",
+    "SR86",
+    "SU5Z",
+    "SU74",
+    "SY6V",
+    "TD5N",
+    "U44R",
+    "VJP3:0",
+    "W9L4",
+    "X4QW",
+    "Y79Y:0",
+    "Y79Y:3",
+    "Y79Y:4",
+    "Y79Y:5",
+    "Y79Y:6",
+    "Y79Y:7",
+    "Y79Y:8",
+    "Y79Y:9",
+    "YJV2",
+    "ZCZ6",
+    "ZL4Z",
+    "ZVH3",
+    "ZXT5",
+};
+
+static bool is_known_accepted(const char *label) {
+    for (size_t i = 0; i < sizeof known_accepted_invalid / sizeof known_accepted_invalid[0]; i++)
+        if (strcmp(known_accepted_invalid[i], label) == 0) return true;
+    return false;
+}
+
 static test_result run_test(test_case *tc, bool verbose) {
     size_t input_len = strlen(tc->yaml);
 
@@ -538,10 +627,8 @@ static test_result run_test(test_case *tc, bool verbose) {
     yam_arena_free(arena);
 
     if (tc->fail) {
-        /* expected to fail */
-        if (parse_error) return RESULT_PASS;
-        /* some "fail" tests might still produce partial output that doesn't match */
-        return RESULT_PASS; /* be lenient for now */
+        /* invalid YAML: the parser must report an error */
+        return parse_error ? RESULT_PASS : RESULT_FAIL;
     }
 
     if (parse_error) {
@@ -672,6 +759,19 @@ int main(int argc, char **argv) {
             else
                 snprintf(label, sizeof(label), "%s", tc->id);
 
+            if (tc->fail && is_known_accepted(label)) {
+                if (result == RESULT_FAIL) {
+                    xfailed++;
+                    if (verbose)
+                        printf("  %-8s %-50.50s " DIM "XFAIL (accepted invalid)" RESET "\n", label, tc->name);
+                } else {
+                    xpassed++;
+                    printf("  %-8s %-50.50s " YELLOW "XPASS (now rejected: remove from known list)" RESET "\n",
+                           label, tc->name);
+                }
+                continue;
+            }
+
             switch (result) {
             case RESULT_PASS:
                 passed++;
@@ -703,7 +803,9 @@ int main(int argc, char **argv) {
     printf(RED "Fail: %d  " RESET, failed);
     printf(YELLOW "Error: %d  " RESET, errors);
     printf(DIM "Skip: %d" RESET, skipped);
+    printf("\n  Known accepted invalid (XFAIL): %d", xfailed);
+    if (xpassed) printf(YELLOW "  XPASS: %d" RESET, xpassed);
     printf("\n\n");
 
-    return (failed > 0 || errors > 0) ? 1 : 0;
+    return (failed > 0 || errors > 0 || xpassed > 0) ? 1 : 0;
 }
