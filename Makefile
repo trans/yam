@@ -218,7 +218,8 @@ bench-parser-cmp: $(OBJDIR)/bench_parser_cmp
 # the same instrumentation. Run via `just fuzz`.
 $(OBJDIR)/fuzz_parser: fuzz/fuzz_parser.c $(SRCS) | $(OBJDIR)
 	clang -std=c11 -Wall -Wextra -Iinclude \
-	  -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g -O1 \
+	  -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
+	  -fno-omit-frame-pointer -g -O1 \
 	  $< $(SRCS) -o $@
 
 clean:
