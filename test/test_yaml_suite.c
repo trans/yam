@@ -502,15 +502,11 @@ typedef enum { RESULT_PASS, RESULT_FAIL, RESULT_ERROR, RESULT_SKIP } test_result
  * gate regressions; once one is fixed the runner reports XPASS (and fails)
  * until it is removed from this list. Keep the list shrinking. */
 static const char *known_accepted_invalid[] = {
-    "9C9N",
-    "DK95:1",
-    "QB6E",
-    "VJP3:0",
-    "Y79Y:3",
+    NULL /* all invalid cases are currently rejected */
 };
 
 static bool is_known_accepted(const char *label) {
-    for (size_t i = 0; i < sizeof known_accepted_invalid / sizeof known_accepted_invalid[0]; i++)
+    for (size_t i = 0; known_accepted_invalid[i]; i++)
         if (strcmp(known_accepted_invalid[i], label) == 0) return true;
     return false;
 }

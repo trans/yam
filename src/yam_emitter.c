@@ -460,6 +460,27 @@ static yam_status emit_props(yam_emitter *e, const yam_event *evt) {
     return emit_tag(e, evt->tag);
 }
 
+static bool has_props(const yam_event *evt) {
+    return (evt->anchor.data && evt->anchor.len) || (evt->tag.data && evt->tag.len);
+}
+
+/* Properties of a block collection go on the line that introduces it
+ * ("key: &a !!map", "- &a"), and the collection itself starts on the next
+ * line; a block collection can never start on its properties' line. */
+static yam_status emit_block_collection_props(yam_emitter *e, const yam_event *evt,
+                                              bool after_key) {
+    yam_status st;
+    if (!has_props(evt)) return YAM_OK;
+    if (after_key) {
+        st = buf_put(e, ' ');
+        if (st != YAM_OK) return st;
+    }
+    st = emit_props(e, evt);
+    if (st != YAM_OK) return st;
+    if (e->len > 0 && e->buf[e->len - 1] == ' ') e->len--; /* trailing space */
+    return YAM_OK;
+}
+
 /* ── Pre-node prefix ─────────────────────────────────────── */
 
 static yam_status emit_pre_node(yam_emitter *e, bool is_collection) {
@@ -492,9 +513,10 @@ static yam_status emit_pre_node(yam_emitter *e, bool is_collection) {
                 if (st != YAM_OK) return st;
             }
         } else {
-            /* ": " or ":\n" between key and value */
+            /* ":" before a block collection value (its properties and the
+             * line break follow, see block_collection_open); ": " otherwise */
             if (is_collection) {
-                st = PUTS(e, ":\n");
+                st = PUTS(e, ":");
                 if (st != YAM_OK) return st;
             } else {
                 st = PUTS(e, ": ");
@@ -604,12 +626,22 @@ yam_status yam_emit(yam_emitter *e, const yam_event *evt) {
 
     case YAM_EVT_MAPPING_START: {
         bool use_flow = (e->opts.style != YAM_EMIT_BLOCK) || evt->flow;
-        bool is_coll = true;
+        emit_ctx *outer = top_ctx(e);
+        bool map_value = !use_flow && outer && outer->type == EMIT_CTX_BLOCK_MAP &&
+                         !outer->expect_key;
 
-        st = emit_pre_node(e, is_coll);
+        st = emit_pre_node(e, !use_flow);
         if (st != YAM_OK) return st;
 
-        st = emit_props(e, evt);
+        if (use_flow) {
+            st = emit_props(e, evt);
+        } else {
+            st = emit_block_collection_props(e, evt, map_value);
+            /* a mapping with properties in a sequence can't share the
+             * "- &a" line with its first key (the props would go to the key) */
+            if (st == YAM_OK && e->after_seq_dash && has_props(evt))
+                e->after_seq_dash = false;
+        }
         if (st != YAM_OK) return st;
 
         if (use_flow) {
@@ -657,12 +689,15 @@ yam_status yam_emit(yam_emitter *e, const yam_event *evt) {
 
     case YAM_EVT_SEQUENCE_START: {
         bool use_flow = (e->opts.style != YAM_EMIT_BLOCK) || evt->flow;
-        bool is_coll = true;
+        emit_ctx *outer = top_ctx(e);
+        bool map_value = !use_flow && outer && outer->type == EMIT_CTX_BLOCK_MAP &&
+                         !outer->expect_key;
 
-        st = emit_pre_node(e, is_coll);
+        st = emit_pre_node(e, !use_flow);
         if (st != YAM_OK) return st;
 
-        st = emit_props(e, evt);
+        st = use_flow ? emit_props(e, evt)
+                      : emit_block_collection_props(e, evt, map_value);
         if (st != YAM_OK) return st;
 
         if (use_flow) {

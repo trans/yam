@@ -313,6 +313,22 @@ static void test_stray_flow_indicators(void) {
     check("a ]", "a ]");  /* ] is fine inside a block plain scalar */
 }
 
+/* Continuation lines of flow collections and quoted scalars must be
+ * indented more than the enclosing block; a line starting with the closing
+ * bracket or quote may be at any indentation (a common style). */
+static void test_continuation_indent(void) {
+    printf("test_continuation_indent:\n");
+    check("key: [\n  a,\n  b\n]", "{ key [ a b ] }");
+    check("key: {\n  a: 1\n}", "{ key { a 1 } }");
+    check("[\na,\nb\n]", "[ a b ]");                  /* top level: any indent */
+    check("k: \"a\n  b\n\"", "{ k a b  }");
+    check("k: [a,\nb]", "{ k [ a ERR");
+    check("k: [a\nb]", "{ k [ a ERR");
+    check("k: \"a\nb\"", "{ k ERR");
+    check("k: 'a\nb'", "{ k ERR");
+    check("- [\n\tfoo\n ]", "[ [ ERR");               /* tab isn't indentation */
+}
+
 /* ── Main ───────────────────────────────────────────────────── */
 
 int main(void) {
@@ -326,6 +342,7 @@ int main(void) {
     test_depth_limit();
     test_event_limit();
     test_stray_flow_indicators();
+    test_continuation_indent();
 
     printf("\n--- Flow tests: %d / %d passed ---\n", tests_passed, tests_run);
     if (tests_failed > 0) printf("    %d FAILED\n", tests_failed);

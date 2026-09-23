@@ -358,6 +358,34 @@ static void test_roundtrip(void) {
 
 /* ── Test: Deeply nested block ───────────────────────────── */
 
+/* A block collection value's properties go on the key's line, and a flow
+ * collection value stays on it; nothing may land at column 0 under a key
+ * (which the parser rejects). */
+static void test_block_value_placement(void) {
+    printf("test_block_value_placement:\n");
+    yam_arena *a = yam_arena_new(4096);
+    const char *yaml =
+        "a: &x\n  b: c\n"
+        "k: [one, two]\n"
+        "s: !!seq\n- u\n- &m\n  v: w\n";
+    yam_str out = roundtrip(yaml, YAM_EMIT_OPTS_DEFAULT, a);
+    ASSERT(str_eq(out,
+        "a: &x\n  b: c\n"
+        "k: [one, two]\n"
+        "s: !!seq\n  - u\n  - &m\n    v: w\n"),
+        "props and flow values stay on the key's line");
+
+    /* the output parses back */
+    yam_parser *p = yam_parser_new(out.data, out.len, a);
+    yam_event evt;
+    yam_status st;
+    while ((st = yam_parse_next(p, &evt)) == YAM_OK && evt.type != YAM_EVT_STREAM_END)
+        ;
+    ASSERT(st == YAM_OK, "emitted block output reparses");
+    yam_parser_free(p);
+    yam_arena_free(a);
+}
+
 static void test_deep_block(void) {
     printf("test_deep_block:\n");
     yam_arena *a = yam_arena_new(4096);
@@ -387,6 +415,7 @@ int main(void) {
     test_tags();
     test_empty_collections();
     test_deep_block();
+    test_block_value_placement();
     test_roundtrip();
 
     printf("\n--- Emitter tests: %d / %d passed ---\n", tests_passed, tests_run);

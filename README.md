@@ -8,11 +8,21 @@ merge key expansion, alias resolution, file input, structured error messages,
 and an arena allocator. Against the
 [YAML Test Suite](https://github.com/yaml/yaml-test-suite), it produces the
 exact expected event stream for all 302 valid-YAML cases (6 more lack
-expected output in the suite itself), and rejects 89 of the 94 invalid-YAML
-cases. The other 5 involve continuation lines of flow collections and
-quoted scalars that are indented no deeper than their parent block; like
-libyaml, yam accepts these, and they are tracked as known failures in the
-test runner. Every case is run through both parser modes.
+expected output in the suite itself), and rejects all 94 invalid-YAML
+cases. Every case is run through both parser modes.
+
+One deliberate leniency: a line inside a flow collection or multi-line
+quoted scalar that starts with the closing bracket or quote may sit at any
+indentation, so the common style
+
+```yaml
+key: [
+  a,
+  b
+]
+```
+
+parses, although strict YAML 1.2 would reject the unindented `]`.
 
 ## Build
 

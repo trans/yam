@@ -143,6 +143,19 @@ static void skip_break(yam_scanner *s) {
     s->col = 1;
 }
 
+/* A continuation line of a multi-line flow scalar or collection must be
+ * indented (with spaces) more than the enclosing block. Called with the
+ * position just past the line's leading blanks. A line that starts with
+ * the construct's closing character (quote or bracket) is allowed at any
+ * indentation, as other parsers do and as is common in practice. */
+static bool continuation_indent_ok(const yam_scanner *s, char closer) {
+    if (s->pos >= s->len || s->buf[s->pos] == closer) return true;
+    size_t line_start = s->pos - (s->col - 1);
+    size_t k = line_start;
+    while (k < s->pos && s->buf[k] == ' ') k++;
+    return (long)(k - line_start) > (long)s->indent;
+}
+
 /* Skip whitespace, line breaks and comments. Returns an error message, or
  * NULL on success:
  *  - a '#' that would start a comment must be separated from the previous
@@ -172,6 +185,14 @@ ALWAYS_INLINE const char *skip_blanks_and_comments(yam_scanner *s) {
         }
 
         break;
+    }
+
+    /* first token on its line inside a flow collection: it must be indented
+     * more than the enclosing block (closing brackets excepted) */
+    if (line_start != SIZE_MAX && s->flow_level > 0 && !AT_END(s)) {
+        char c = s->buf[s->pos];
+        if (c != ']' && c != '}' && !continuation_indent_ok(s, 0))
+            return "flow collection content must be indented more than the enclosing block";
     }
 
     /* first token on its line, in block context: check the indentation.
@@ -637,6 +658,8 @@ static yam_status scan_single_quoted(yam_scanner *s, yam_token *tok) {
             /* document indicators at start of line in multi-line quoted scalar → error */
             if (s->col == 1 && is_doc_indicator_at(s->buf, s->pos, s->len))
                 SCAN_ERROR(s, "document indicator in single-quoted scalar");
+            if (!continuation_indent_ok(s, '\''))
+                SCAN_ERROR(s, "continuation line of a quoted scalar must be indented");
             SQ_ENSURE(break_count);
             if (break_count == 1) {
                 buf[out++] = ' ';
@@ -782,6 +805,9 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
                     /* skip the break and any leading whitespace on next line */
                     if (esc == '\r' && PEEK(s) == '\n') advance(s, 1);
                     while (!AT_END(s) && yam_is_blank(PEEK(s))) advance(s, 1);
+                    if (!AT_END(s) && !yam_is_break(PEEK(s)) &&
+                        !continuation_indent_ok(s, '"'))
+                        SCAN_ERROR(s, "continuation line of a quoted scalar must be indented");
                     content_end = out; /* escaped newline doesn't affect trim */
                     continue; /* skip content_end update below */
                 default:
@@ -803,6 +829,8 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
             /* document indicators at start of line in multi-line quoted scalar → error */
             if (s->col == 1 && is_doc_indicator_at(s->buf, s->pos, s->len))
                 SCAN_ERROR(s, "document indicator in double-quoted scalar");
+            if (!continuation_indent_ok(s, '"'))
+                SCAN_ERROR(s, "continuation line of a quoted scalar must be indented");
             if (break_count == 1) {
                 buf[out++] = ' ';
             } else {
