@@ -62,6 +62,14 @@ struct yam_scanner {
     /* arena for string duplication when needed */
     yam_arena   *arena;
 
+    /* implicit-key check (see check_implicit_key) */
+    struct { size_t line; bool is_map; } *flows; /* open flow brackets */
+    int          flows_len, flows_cap;
+    size_t       node_line;        /* start line of the last node that */
+    size_t       node_end;         /* could be a key, and its end offset */
+    bool         explicit_key;     /* a '?' awaits its ':' ... */
+    int          explicit_depth;   /* ... at this flow depth */
+
     /* error context */
     char      error_msg[256];
     yam_mark  error_mark;
@@ -153,6 +161,51 @@ static bool skip_blanks_and_comments(yam_scanner *s) {
         break;
     }
     return true;
+}
+
+/* ── Flow bracket stack (for the implicit-key check) ─────── */
+
+static bool flow_push(yam_scanner *s, bool is_map) {
+    if (s->flows_len >= s->flows_cap) {
+        int nc = s->flows_cap ? s->flows_cap * 2 : 16;
+        void *nf = realloc(s->flows, (size_t)nc * sizeof(*s->flows));
+        if (!nf) return false;
+        s->flows = nf;
+        s->flows_cap = nc;
+    }
+    s->flows[s->flows_len].line = s->line;
+    s->flows[s->flows_len].is_map = is_map;
+    s->flows_len++;
+    return true;
+}
+
+static size_t flow_pop(yam_scanner *s) {
+    return s->flows_len > 0 ? s->flows[--s->flows_len].line : s->line;
+}
+
+/* Record a token that could be an implicit key: a flow scalar, an alias
+ * or a flow collection (start line of the node, end offset of the token). */
+static inline void note_node(yam_scanner *s, size_t start_line, size_t end) {
+    s->node_line = start_line;
+    s->node_end = end;
+}
+
+/* Called for a ':' value indicator at the current position. An implicit key
+ * (one not introduced by '?') must lie on a single line: if a node directly
+ * precedes the ':' on its line, it must also start on that line. Flow
+ * mappings are exempt (their keys may span lines). A ':' with no node
+ * right before it on the line is left to the parser. */
+static bool implicit_key_ok(yam_scanner *s) {
+    if (s->explicit_key && s->explicit_depth == s->flows_len) {
+        s->explicit_key = false; /* value of a '?' key: may span lines */
+        return true;
+    }
+    if (s->node_line >= s->line) return true;
+    if (s->flows_len > 0 && s->flows[s->flows_len - 1].is_map) return true;
+    size_t j = s->pos;
+    if (s->node_end > j) return true; /* no node before this point */
+    while (j > s->node_end && (s->buf[j - 1] == ' ' || s->buf[j - 1] == '\t')) j--;
+    return j != s->node_end;
 }
 
 /* ── Indent management ───────────────────────────────────── */
@@ -448,8 +501,10 @@ static yam_status scan_plain_scalar(yam_scanner *s, yam_token *tok) {
     s->last_token_col = (int)start.col - 1;  /* 0-based col of this scalar */
     if (in_buf) {
         buf[out] = '\0';
+        note_node(s, start.line, end.offset);
         *tok = tok_scalar((yam_str){buf, out}, YAM_SCALAR_PLAIN, start, end);
     } else {
+        note_node(s, start.line, end.offset);
         *tok = tok_scalar((yam_str){single_start, single_len}, YAM_SCALAR_PLAIN, start, end);
     }
     return YAM_OK;
@@ -479,6 +534,7 @@ static yam_status scan_single_quoted(yam_scanner *s, yam_token *tok) {
             s->pos = j + 1;
             s->last_token_col = (int)start.col - 1;
             s->last_was_quoted = true;
+            note_node(s, start.line, s->pos);
             *tok = tok_scalar(val, YAM_SCALAR_SINGLE_QUOTED, start, mark(s));
             return YAM_OK;
         }
@@ -544,6 +600,7 @@ static yam_status scan_single_quoted(yam_scanner *s, yam_token *tok) {
     buf[out] = '\0';
     s->last_token_col = (int)start.col - 1;
     s->last_was_quoted = true;
+    note_node(s, start.line, s->pos);
     *tok = tok_scalar((yam_str){buf, out}, YAM_SCALAR_SINGLE_QUOTED, start, mark(s));
     return YAM_OK;
 
@@ -568,6 +625,7 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
             s->pos = j + 1;
             s->last_token_col = (int)start.col - 1;
             s->last_was_quoted = true;
+            note_node(s, start.line, s->pos);
             *tok = tok_scalar(val, YAM_SCALAR_DOUBLE_QUOTED, start, mark(s));
             return YAM_OK;
         }
@@ -708,6 +766,7 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
     buf[out] = '\0';
     s->last_token_col = (int)start.col - 1;
     s->last_was_quoted = true;
+    note_node(s, start.line, s->pos);
     *tok = tok_scalar((yam_str){buf, out}, YAM_SCALAR_DOUBLE_QUOTED, start, mark(s));
     return YAM_OK;
 }
@@ -769,6 +828,7 @@ static yam_status scan_anchor_or_alias(yam_scanner *s, yam_token *tok) {
     if (name_len == 0) SCAN_ERROR(s, "empty anchor or alias name");
 
     s->last_token_col = (int)start.col - 1;
+    if (!is_anchor) note_node(s, start.line, s->pos);
     *tok = (yam_token){
         .type  = is_anchor ? YAM_TOK_ANCHOR : YAM_TOK_ALIAS,
         .value = {name_start, name_len},
@@ -819,6 +879,7 @@ yam_scanner *yam_scanner_new(const char *input, size_t len, yam_arena *a) {
         .at_doc_start         = true,
         .pending_count        = 0,
         .last_token_col       = 0,
+        .node_end             = SIZE_MAX, /* no node seen yet */
         .arena = a,
     };
 
@@ -829,6 +890,7 @@ yam_scanner *yam_scanner_new(const char *input, size_t len, yam_arena *a) {
 
     return s;
 }
+
 
 yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
     /* drain pending tokens first */
@@ -906,27 +968,35 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
     /* flow indicators */
     switch (c) {
     case '[':
+        if (!flow_push(s, false)) return YAM_ERR_MEMORY;
         s->flow_level++;
         advance(s, 1);
         *tok = tok_simple(YAM_TOK_FLOW_SEQ_START, start, mark(s));
         return YAM_OK;
-    case ']':
+    case ']': {
+        size_t open_line = flow_pop(s);
         if (s->flow_level > 0) s->flow_level--;
         advance(s, 1);
+        note_node(s, open_line, s->pos);
         s->last_was_quoted = true; /* allow ]:value like "key":value */
         *tok = tok_simple(YAM_TOK_FLOW_SEQ_END, start, mark(s));
         return YAM_OK;
+    }
     case '{':
+        if (!flow_push(s, true)) return YAM_ERR_MEMORY;
         s->flow_level++;
         advance(s, 1);
         *tok = tok_simple(YAM_TOK_FLOW_MAP_START, start, mark(s));
         return YAM_OK;
-    case '}':
+    case '}': {
+        size_t open_line = flow_pop(s);
         if (s->flow_level > 0) s->flow_level--;
         advance(s, 1);
+        note_node(s, open_line, s->pos);
         s->last_was_quoted = true; /* allow }:value like "key":value */
         *tok = tok_simple(YAM_TOK_FLOW_MAP_END, start, mark(s));
         return YAM_OK;
+    }
     case ',':
         advance(s, 1);
         *tok = tok_simple(YAM_TOK_FLOW_ENTRY, start, mark(s));
@@ -956,6 +1026,8 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
                 indent_push(s, qcol);
             }
             advance(s, 1);
+            s->explicit_key = true;
+            s->explicit_depth = s->flows_len;
             *tok = tok_simple(YAM_TOK_BLOCK_MAP_KEY, start, mark(s));
             return YAM_OK;
         }
@@ -965,6 +1037,8 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
         uint8_t next = PEEK_AT(s, 1);
         if (yam_is_blank_or_break(next) || next == 0) {
             advance(s, 1);
+            s->explicit_key = true;
+            s->explicit_depth = s->flows_len;
             *tok = tok_simple(YAM_TOK_BLOCK_MAP_KEY, start, mark(s));
             return YAM_OK;
         }
@@ -979,6 +1053,8 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
             /* use minimum of key and colon column — handles explicit key
              * (? key\n: val) where colon_col is the mapping indent */
             int map_col = key_col < colon_col ? key_col : colon_col;
+            if (!implicit_key_ok(s))
+                SCAN_ERROR(s, "implicit key must be on a single line");
             if (map_col > s->indent) {
                 indent_push(s, map_col);
             }
@@ -992,6 +1068,8 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
              /* `:` after a JSON-like key (quoted scalar) */
              s->last_was_quoted)) {
             s->last_was_quoted = false; /* consumed */
+            if (!implicit_key_ok(s))
+                SCAN_ERROR(s, "implicit key must be on a single line");
             advance(s, 1);
             *tok = tok_simple(YAM_TOK_BLOCK_MAP_VALUE, start, mark(s));
             return YAM_OK;
@@ -1314,6 +1392,7 @@ yam_mark yam_scanner_error_mark(yam_scanner *s) {
 void yam_scanner_free(yam_scanner *s) {
     if (!s) return;
     free(s->indents.data);
+    free(s->flows);
     free(s);
 }
 
