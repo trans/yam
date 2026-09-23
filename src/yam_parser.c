@@ -124,11 +124,15 @@ struct yam_parser {
     int max_events;
     int max_depth;
 
+    /* line of the current document's '---' marker (0 if none): a block
+     * collection may not start on that line */
+    size_t doc_start_line;
+
     /* error context */
     char     error_msg[256];
     yam_mark error_mark;
-    bool     oom;        /* stop parsing: allocation failure or limit_hit */
-    bool     limit_hit;  /* a safety limit (events, depth, aliases) was hit */
+    bool     oom;         /* stop parsing (see stop_status) */
+    yam_status stop_status; /* why oom was set: 0 = allocation failure */
 
     /* incremental state machine */
     bool         incremental;   /* true = state machine, false = eager */
@@ -173,18 +177,23 @@ struct yam_parser {
  * caller's field writes are then copied out with wide loads. */
 #define evt_simple(t) ((yam_event){ .type = (t) })
 
-/* Record that a safety limit was exceeded. Sets oom so every loop stops;
- * OOM_STATUS then reports YAM_ERR_LIMIT rather than YAM_ERR_MEMORY. */
-static void hit_limit(yam_parser *p, const char *msg) {
-    if (!p->limit_hit) {
+/* Stop parsing from a helper that cannot return a status: sets oom, which
+ * every loop checks, and records the status OOM_STATUS will report. */
+static void stop_with(yam_parser *p, yam_status status, const char *msg) {
+    if (!p->stop_status) {
         snprintf(p->error_msg, sizeof(p->error_msg), "%s", msg);
         p->error_mark = p->current.start;
+        p->stop_status = status;
     }
-    p->limit_hit = true;
     p->oom = true;
 }
 
-#define OOM_STATUS(p) ((p)->limit_hit ? YAM_ERR_LIMIT : YAM_ERR_MEMORY)
+/* A safety limit (events, depth, alias expansion) was exceeded. */
+static void hit_limit(yam_parser *p, const char *msg) {
+    stop_with(p, YAM_ERR_LIMIT, msg);
+}
+
+#define OOM_STATUS(p) ((p)->stop_status ? (p)->stop_status : YAM_ERR_MEMORY)
 
 static inline bool over_limit(yam_parser *p) {
     return p->max_events > 0 && p->evt_len >= p->max_events;
@@ -221,6 +230,11 @@ static inline bool dequeue(yam_parser *p, yam_event *evt) {
 }
 
 static inline bool push_ctx(yam_parser *p, ctx_type type, int indent) {
+    if ((type == CTX_BLOCK_MAP || type == CTX_BLOCK_SEQ) && p->doc_start_line &&
+        p->current.start.line == p->doc_start_line) {
+        stop_with(p, YAM_ERR_PARSE, "block collection cannot start on the '---' line");
+        return false;
+    }
     if (p->max_depth > 0 && p->ctx_len >= p->max_depth) {
         hit_limit(p, "nesting depth limit exceeded");
         return false;
@@ -448,11 +462,28 @@ static bool tag_handle_declared(const yam_parser *p, yam_str raw) {
     return false;
 }
 
+/* A node's second property on a new line must be indented more than the
+ * enclosing block collection ("key: &x\n!!map" is invalid). */
+static bool props_continuation_ok(yam_parser *p) {
+    if (!(p->has_anchor || p->has_tag)) return true;
+    if (p->current.start.line == p->props_line || in_flow(p)) return true;
+    ctx_entry *top = top_ctx(p);
+    int parent = top ? top->indent : -1;
+    return tok_col(p) > parent;
+}
+
 static yam_status consume_props(yam_parser *p) {
     /* Consume at most one anchor and one tag per node */
     for (;;) {
         yam_status st = peek_token(p);
         if (st != YAM_OK) return st;
+        if ((tok_type(p) == YAM_TOK_ANCHOR && !p->has_anchor) ||
+            (tok_type(p) == YAM_TOK_TAG && !p->has_tag)) {
+            if (!(tok_type(p) == YAM_TOK_ANCHOR && p->has_tag &&
+                  p->current.start.line != p->props_line) &&
+                !props_continuation_ok(p))
+                PARSE_ERROR(p, "node properties must be indented more than the parent node");
+        }
         if (tok_type(p) == YAM_TOK_ANCHOR && !p->has_anchor) {
             /* If we already have a tag on a previous line and see an anchor
              * on a new line, stop — the tag is for the collection and the
@@ -481,6 +512,11 @@ static yam_status consume_props(yam_parser *p) {
             break;
         }
     }
+    /* properties directly before an alias would apply to it (on a later
+     * line they belong to a block collection whose first key is the alias) */
+    if ((p->has_anchor || p->has_tag) && tok_type(p) == YAM_TOK_ALIAS &&
+        p->current.start.line == p->props_line)
+        PARSE_ERROR(p, "an alias cannot have an anchor or tag");
     return YAM_OK;
 }
 
@@ -1047,6 +1083,11 @@ static yam_status parse_block_node(yam_parser *p) {
     yam_token_type tt = tok_type(p);
     int col = tok_col(p);
 
+    /* a block sequence must start on a new line after its properties */
+    if (tt == YAM_TOK_BLOCK_SEQ_ENTRY && (p->has_anchor || p->has_tag) &&
+        p->current.start.line == p->props_line)
+        PARSE_ERROR(p, "block sequence cannot start on the same line as its properties");
+
     /* If next token is ANCHOR/TAG, these are props for an inner node.
      * Save our props (for the outer collection) and let the inner
      * node's props be consumed when we recurse into parsing. */
@@ -1126,8 +1167,10 @@ static yam_status parse_block_node(yam_parser *p) {
                 return YAM_OK;
             }
 
-            /* not a mapping — outer props go on scalar, inner should too
-             * (but this is unusual; fall through with scalar) */
+            /* not a mapping: both sets of properties apply to the scalar,
+             * which is fine unless they conflict (two anchors or two tags) */
+            if ((inner_has_anchor && p->has_anchor) || (inner_has_tag && p->has_tag))
+                PARSE_ERROR(p, "a node cannot have two anchors or two tags");
             attach_props(p, &evt);
             enqueue(p, &evt);
             return YAM_OK;
@@ -1747,6 +1790,7 @@ static yam_status parse_document(yam_parser *p) {
         }
         yam_mark doc_start = p->current.start;
         yam_mark doc_end = p->current.end;
+        p->doc_start_line = doc_start.line;
         consume_token(p);
         yam_event evt = evt_simple(YAM_EVT_DOC_START);
         evt.implicit = false;
@@ -1800,6 +1844,7 @@ static yam_status parse_document(yam_parser *p) {
 
     /* implicit document */
     if (!p->doc_open) {
+        p->doc_start_line = 0;
         ensure_doc(p, false, p->current.start);
     }
 
@@ -2570,6 +2615,11 @@ static inline void inc_emit(yam_parser *p, const yam_event *evt) {
 
 static inline void inc_push_frame(yam_parser *p, ctx_type type, int indent,
                                    parser_state return_state) {
+    if ((type == CTX_BLOCK_MAP || type == CTX_BLOCK_SEQ) && p->doc_start_line &&
+        p->current.start.line == p->doc_start_line) {
+        stop_with(p, YAM_ERR_PARSE, "block collection cannot start on the '---' line");
+        return;
+    }
     if (p->max_depth > 0 && p->frame_len >= p->max_depth) {
         hit_limit(p, "nesting depth limit exceeded");
         return;
@@ -3216,6 +3266,7 @@ static yam_status parser_step(yam_parser *p) {
         }
         peek_token(p);
         mark = p->current.start;
+        p->doc_start_line = mark.line;
         consume_token(p);
         evt = evt_simple(YAM_EVT_DOC_START);
         evt.implicit = false;
@@ -3243,6 +3294,7 @@ static yam_status parser_step(yam_parser *p) {
             p->doc_open = false;
         }
         peek_token(p);
+        p->doc_start_line = 0;
         evt = evt_simple(YAM_EVT_DOC_START);
         evt.implicit = true;
         evt.start = p->current.start;
@@ -4089,7 +4141,7 @@ yam_status yam_parse_next(yam_parser *p, yam_event *evt) {
             p->pending_anchor = YAM_STR_NULL;
             p->pending_tag = YAM_STR_NULL;
             p->oom = false;
-            p->limit_hit = false;
+            p->stop_status = YAM_OK;
             p->events_delivered = 0;
             /* reset scanner to beginning */
             yam_scanner_free(p->scanner);
