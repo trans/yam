@@ -8,9 +8,11 @@ merge key expansion, alias resolution, file input, structured error messages,
 and an arena allocator. Against the
 [YAML Test Suite](https://github.com/yaml/yaml-test-suite), it produces the
 exact expected event stream for all 302 valid-YAML cases (6 more lack
-expected output in the suite itself). Error detection is less complete: of
-the 94 invalid-YAML cases, 19 are currently rejected and 75 are accepted
-leniently; these are tracked as known failures in the test runner.
+expected output in the suite itself), and rejects 89 of the 94 invalid-YAML
+cases. The other 5 involve continuation lines of flow collections and
+quoted scalars that are indented no deeper than their parent block; like
+libyaml, yam accepts these, and they are tracked as known failures in the
+test runner. Every case is run through both parser modes.
 
 ## Build
 

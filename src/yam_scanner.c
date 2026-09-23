@@ -63,18 +63,28 @@ struct yam_scanner {
     yam_arena   *arena;
 
     /* implicit-key check (see check_implicit_key) */
-    struct { size_t line; bool is_map; } *flows; /* open flow brackets */
+    struct { yam_mark open; bool is_map; } *flows; /* open flow brackets */
     int          flows_len, flows_cap;
     size_t       node_line;        /* start line of the last node that */
     size_t       node_end;         /* could be a key, and its end offset */
     bool         explicit_key;     /* a '?' awaits its ':' ... */
     int          explicit_depth;   /* ... at this flow depth */
     size_t       key_colon_line;   /* line of the last block implicit-key ':' */
+    size_t       node_start;       /* start offset of the last noted node */
+    size_t       indicator_end;    /* offset just past the last block - ? : */
 
     /* error context */
     char      error_msg[256];
     yam_mark  error_mark;
 };
+
+/* For small helpers on the per-token path that GCC may otherwise decline
+ * to inline once they grow a little. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define ALWAYS_INLINE static inline __attribute__((always_inline))
+#else
+#  define ALWAYS_INLINE static inline
+#endif
 
 /* ── Error reporting ─────────────────────────────────────── */
 
@@ -133,10 +143,14 @@ static void skip_break(yam_scanner *s) {
     s->col = 1;
 }
 
-/* Skip whitespace, line breaks and comments. Returns false if a '#' that
- * would start a comment directly follows the previous token: comments must
- * be separated from other tokens by whitespace. */
-static bool skip_blanks_and_comments(yam_scanner *s) {
+/* Skip whitespace, line breaks and comments. Returns an error message, or
+ * NULL on success:
+ *  - a '#' that would start a comment must be separated from the previous
+ *    token by whitespace;
+ *  - in block context a tab may not be part of a line's indentation: the
+ *    spaces before it must already exceed the current block indent. */
+ALWAYS_INLINE const char *skip_blanks_and_comments(yam_scanner *s) {
+    size_t line_start = (s->col == 1) ? s->pos : SIZE_MAX;
     for (;;) {
         /* skip spaces and tabs */
         size_t skip = yam_skip_blanks(BUF_AT(s), REMAINING(s));
@@ -145,23 +159,31 @@ static bool skip_blanks_and_comments(yam_scanner *s) {
         /* comment? skip to end of line */
         if (PEEK(s) == '#') {
             if (s->pos > 0 && !yam_is_blank_or_break((uint8_t)s->buf[s->pos - 1]))
-                return false;
+                return "comment must be separated from other tokens by whitespace";
             size_t to_break = yam_scan_to_break(BUF_AT(s), REMAINING(s));
             advance_cols(s, to_break);
         }
 
-        /* line break? */
+        /* line break? continue with the next line */
         if (yam_is_break(PEEK(s))) {
             skip_break(s);
-            /* in block context, continue eating whitespace on next line */
-            if (s->flow_level == 0) continue;
-            /* in flow context, also continue */
+            line_start = s->pos;
             continue;
         }
 
         break;
     }
-    return true;
+
+    /* first token on its line, in block context: check the indentation.
+     * [line_start, pos) holds only blanks, so it contains a tab exactly
+     * when its leading run of spaces stops short of pos. */
+    if (line_start != SIZE_MAX && s->flow_level == 0 && !AT_END(s)) {
+        size_t spaces = line_start;
+        while (spaces < s->pos && s->buf[spaces] == ' ') spaces++;
+        if (spaces < s->pos && (long)(spaces - line_start) <= (long)s->indent)
+            return "tabs are not allowed as indentation";
+    }
+    return NULL;
 }
 
 /* ── Flow bracket stack (for the implicit-key check) ─────── */
@@ -174,21 +196,36 @@ static bool flow_push(yam_scanner *s, bool is_map) {
         s->flows = nf;
         s->flows_cap = nc;
     }
-    s->flows[s->flows_len].line = s->line;
+    s->flows[s->flows_len].open = mark(s);
     s->flows[s->flows_len].is_map = is_map;
     s->flows_len++;
     return true;
 }
 
-static size_t flow_pop(yam_scanner *s) {
-    return s->flows_len > 0 ? s->flows[--s->flows_len].line : s->line;
+static yam_mark flow_pop(yam_scanner *s) {
+    return s->flows_len > 0 ? s->flows[--s->flows_len].open : mark(s);
 }
 
 /* Record a token that could be an implicit key: a flow scalar, an alias
  * or a flow collection (start line of the node, end offset of the token). */
-static inline void note_node(yam_scanner *s, size_t start_line, size_t end) {
-    s->node_line = start_line;
+static inline void note_node(yam_scanner *s, yam_mark start, size_t end) {
+    s->node_line = start.line;
+    s->node_start = start.offset;
     s->node_end = end;
+}
+
+/* Is the whitespace between the last block indicator (- ? :) and offset
+ * `at` on one line and does it contain a tab? A block collection may not
+ * be separated from its indicator by a tab ("-\t- a", "?\tkey: v"). */
+static bool tab_after_indicator(const yam_scanner *s, size_t at) {
+    if (s->indicator_end == SIZE_MAX || s->indicator_end > at) return false;
+    bool tab = false;
+    for (size_t i = s->indicator_end; i < at; i++) {
+        char c = s->buf[i];
+        if (c == '\t') tab = true;
+        else if (c != ' ') return false;
+    }
+    return tab;
 }
 
 /* Classify a ':' value indicator at the current position. */
@@ -521,10 +558,10 @@ static yam_status scan_plain_scalar(yam_scanner *s, yam_token *tok) {
     s->last_token_col = (int)start.col - 1;  /* 0-based col of this scalar */
     if (in_buf) {
         buf[out] = '\0';
-        note_node(s, start.line, end.offset);
+        note_node(s, start, end.offset);
         *tok = tok_scalar((yam_str){buf, out}, YAM_SCALAR_PLAIN, start, end);
     } else {
-        note_node(s, start.line, end.offset);
+        note_node(s, start, end.offset);
         *tok = tok_scalar((yam_str){single_start, single_len}, YAM_SCALAR_PLAIN, start, end);
     }
     return YAM_OK;
@@ -554,7 +591,7 @@ static yam_status scan_single_quoted(yam_scanner *s, yam_token *tok) {
             s->pos = j + 1;
             s->last_token_col = (int)start.col - 1;
             s->last_was_quoted = true;
-            note_node(s, start.line, s->pos);
+            note_node(s, start, s->pos);
             *tok = tok_scalar(val, YAM_SCALAR_SINGLE_QUOTED, start, mark(s));
             return YAM_OK;
         }
@@ -620,7 +657,7 @@ static yam_status scan_single_quoted(yam_scanner *s, yam_token *tok) {
     buf[out] = '\0';
     s->last_token_col = (int)start.col - 1;
     s->last_was_quoted = true;
-    note_node(s, start.line, s->pos);
+    note_node(s, start, s->pos);
     *tok = tok_scalar((yam_str){buf, out}, YAM_SCALAR_SINGLE_QUOTED, start, mark(s));
     return YAM_OK;
 
@@ -645,7 +682,7 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
             s->pos = j + 1;
             s->last_token_col = (int)start.col - 1;
             s->last_was_quoted = true;
-            note_node(s, start.line, s->pos);
+            note_node(s, start, s->pos);
             *tok = tok_scalar(val, YAM_SCALAR_DOUBLE_QUOTED, start, mark(s));
             return YAM_OK;
         }
@@ -786,7 +823,7 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
     buf[out] = '\0';
     s->last_token_col = (int)start.col - 1;
     s->last_was_quoted = true;
-    note_node(s, start.line, s->pos);
+    note_node(s, start, s->pos);
     *tok = tok_scalar((yam_str){buf, out}, YAM_SCALAR_DOUBLE_QUOTED, start, mark(s));
     return YAM_OK;
 }
@@ -848,7 +885,7 @@ static yam_status scan_anchor_or_alias(yam_scanner *s, yam_token *tok) {
     if (name_len == 0) SCAN_ERROR(s, "empty anchor or alias name");
 
     s->last_token_col = (int)start.col - 1;
-    if (!is_anchor) note_node(s, start.line, s->pos);
+    if (!is_anchor) note_node(s, start, s->pos);
     *tok = (yam_token){
         .type  = is_anchor ? YAM_TOK_ANCHOR : YAM_TOK_ALIAS,
         .value = {name_start, name_len},
@@ -900,6 +937,7 @@ yam_scanner *yam_scanner_new(const char *input, size_t len, yam_arena *a) {
         .pending_count        = 0,
         .last_token_col       = 0,
         .node_end             = SIZE_MAX, /* no node seen yet */
+        .indicator_end        = SIZE_MAX,
         .arena = a,
     };
 
@@ -929,8 +967,10 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
     }
 
     /* skip whitespace and comments */
-    if (!skip_blanks_and_comments(s))
-        SCAN_ERROR(s, "comment must be separated from other tokens by whitespace");
+    {
+        const char *err = skip_blanks_and_comments(s);
+        if (err) SCAN_ERROR(s, err);
+    }
 
     /* stream end */
     if (AT_END(s)) {
@@ -999,10 +1039,10 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
         *tok = tok_simple(YAM_TOK_FLOW_SEQ_START, start, mark(s));
         return YAM_OK;
     case ']': {
-        size_t open_line = flow_pop(s);
+        yam_mark open = flow_pop(s);
         if (s->flow_level > 0) s->flow_level--;
         advance(s, 1);
-        note_node(s, open_line, s->pos);
+        note_node(s, open, s->pos);
         s->last_was_quoted = true; /* allow ]:value like "key":value */
         *tok = tok_simple(YAM_TOK_FLOW_SEQ_END, start, mark(s));
         return YAM_OK;
@@ -1014,10 +1054,10 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
         *tok = tok_simple(YAM_TOK_FLOW_MAP_START, start, mark(s));
         return YAM_OK;
     case '}': {
-        size_t open_line = flow_pop(s);
+        yam_mark open = flow_pop(s);
         if (s->flow_level > 0) s->flow_level--;
         advance(s, 1);
-        note_node(s, open_line, s->pos);
+        note_node(s, open, s->pos);
         s->last_was_quoted = true; /* allow }:value like "key":value */
         *tok = tok_simple(YAM_TOK_FLOW_MAP_END, start, mark(s));
         return YAM_OK;
@@ -1035,11 +1075,14 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
             /* "key: - a" — a block sequence can't start on a key's line */
             if (s->key_colon_line == s->line)
                 SCAN_ERROR(s, "block sequence entries are not allowed on the same line as a mapping key");
+            if (tab_after_indicator(s, s->pos))
+                SCAN_ERROR(s, "tabs are not allowed before a nested block collection");
             int col = (int)s->col - 1;
             if (col > s->indent) {
                 indent_push(s, col);
             }
             advance(s, 1);
+            s->indicator_end = s->pos;
             *tok = tok_simple(YAM_TOK_BLOCK_SEQ_ENTRY, start, mark(s));
             return YAM_OK;
         }
@@ -1049,11 +1092,14 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
     if (c == '?' && s->flow_level == 0) {
         uint8_t next = PEEK_AT(s, 1);
         if (yam_is_blank_or_break(next) || next == 0) {
+            if (tab_after_indicator(s, s->pos))
+                SCAN_ERROR(s, "tabs are not allowed before a nested block collection");
             int qcol = (int)s->col - 1;
             if (qcol > s->indent) {
                 indent_push(s, qcol);
             }
             advance(s, 1);
+            s->indicator_end = s->pos;
             s->explicit_key = true;
             s->explicit_depth = s->flows_len;
             *tok = tok_simple(YAM_TOK_BLOCK_MAP_KEY, start, mark(s));
@@ -1089,12 +1135,15 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
                  * another implicit key */
                 if (s->key_colon_line == s->line)
                     SCAN_ERROR(s, "mapping values are not allowed on the same line as another key");
+                if (tab_after_indicator(s, s->node_start))
+                    SCAN_ERROR(s, "tabs are not allowed before a nested block collection");
                 s->key_colon_line = s->line;
             }
             if (map_col > s->indent) {
                 indent_push(s, map_col);
             }
             advance(s, 1);
+            s->indicator_end = s->pos;
             *tok = tok_simple(YAM_TOK_BLOCK_MAP_VALUE, start, mark(s));
             return YAM_OK;
         }
@@ -1233,7 +1282,19 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
             }
             /* document indicators at col 0 always terminate block scalar */
             if (li == 0 && is_doc_indicator_at(s->buf, s->pos, s->len)) break;
-            if (li < base_indent) break;
+            if (li < base_indent) {
+                /* a whitespace-only line whose indentation contains a tab
+                 * is neither an empty line nor a trailing comment */
+                size_t k = s->pos + li;
+                if (s->buf[k] == '\t') {
+                    while (k < s->len && (s->buf[k] == ' ' || s->buf[k] == '\t')) k++;
+                    if (k >= s->len || yam_is_break((uint8_t)s->buf[k])) {
+                        s->pos = save_pos; s->line = save_line; s->col = save_col;
+                        SCAN_ERROR(s, "tabs are not allowed as indentation in a block scalar");
+                    }
+                }
+                break;
+            }
             size_t line_start = s->pos + base_indent;
             size_t rest = 0;
             while (line_start + rest < s->len && !yam_is_break((uint8_t)s->buf[line_start + rest]))
