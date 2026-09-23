@@ -136,6 +136,19 @@ static void test_flow_empty_props(void) {
     check("&r\n&s a: b\nc: d\n", "&r { &s a b c d }");
     check("a: ? b\n", "{ a ERR");            /* '?' on an implicit key's line */
     check("? []\n[]\n", "{ [ ] ~ ERR");       /* flow key without ':' */
+    /* a key with props on its line: indentation counts from the props */
+    check("&r\n&k oo: |\n  a\n", "&r { &k oo a\n }");
+    check("&r\n&k oo: a\n  b\nc: d\n", "&r { &k oo a b c d }");
+    /* props on the line before a bare ':' belong to the mapping */
+    check("a: &m\n : &b\n*c : d\n", "{ a &m { ~ &b ~ } *c d }");
+    /* an empty sequence entry before a shallower ':' */
+    check("?\n  -\n:\n", "{ [ ~ ] ~ }");
+    check("a\x01b: c\n", "ERR");           /* control character */
+    /* a ':' starting a later line is not an implicit key's */
+    check("? &x\n  k: *t\n: v\n", "{ &x { k *t } v }");
+    /* props on two lines before a flow collection */
+    check("&a\n&b [x]\n", "ERR");                        /* two anchors */
+    check("&m\n&k [a]: b\nc: d\n", "&m { &k [ a ] b c d }"); /* key */
     /* a key at the mapping's indentation ends an empty value */
     check("a:\n*b : c\n", "{ a ~ *b c }");
     check("a:\n[x]: y\n", "{ a ~ [ x ] y }");

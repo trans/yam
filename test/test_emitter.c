@@ -461,6 +461,43 @@ static void test_build_events(void) {
     yam_arena_free(a);
 }
 
+/* Tags are written in a form that reads back as the same tag */
+static void test_tag_forms(void) {
+    printf("test_tag_forms:\n");
+    yam_arena *a = yam_arena_new(4096);
+    yam_emitter *e = yam_emitter_new(a);
+    yam_emit_stream_start(e);
+    yam_emit_document_start(e, true);
+    yam_emit_sequence_start(e, YAM_STR_NULL, YAM_STR_NULL, false);
+    yam_emit_scalar(e, YAM_STR_LIT("a"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_TAG_INT);
+    yam_emit_scalar(e, YAM_STR_LIT("b"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_LIT("!local"));
+    yam_emit_scalar(e, YAM_STR_LIT("c"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_LIT("!a b"));
+    yam_emit_scalar(e, YAM_STR_LIT("d"), YAM_SCALAR_PLAIN, YAM_STR_NULL,
+                    YAM_STR_LIT("tag:example.com,2000:x!y"));
+    yam_emit_sequence_end(e);
+    yam_emit_document_end(e, true);
+    yam_emit_stream_end(e);
+    yam_str out = yam_emitter_output(e);
+    ASSERT(str_eq(out, "- !!int a\n- !local b\n- !<!a%20b> c\n"
+                       "- !<tag:example.com,2000:x!y> d\n"), "tag forms");
+
+    /* and they read back as the same tags */
+    const char *want[] = { "tag:yaml.org,2002:int", "!local", "!a b",
+                           "tag:example.com,2000:x!y" };
+    yam_parser *p = yam_parser_new(out.data, out.len, a);
+    const yam_event *evt;
+    int i = 0;
+    bool same = true;
+    while (yam_parse_next(p, &evt) == YAM_OK && evt->type != YAM_EVT_STREAM_END)
+        if (evt->type == YAM_EVT_SCALAR)
+            same = same && i < 4 && evt->tag.len == strlen(want[i]) &&
+                   memcmp(evt->tag.data, want[i], evt->tag.len) == 0 && ++i;
+    ASSERT(same && i == 4, "tags read back unchanged");
+    yam_parser_free(p);
+    yam_emitter_free(e);
+    yam_arena_free(a);
+}
+
 static void test_deep_block(void) {
     printf("test_deep_block:\n");
     yam_arena *a = yam_arena_new(4096);
@@ -492,6 +529,7 @@ int main(void) {
     test_deep_block();
     test_block_value_placement();
     test_build_events();
+    test_tag_forms();
     test_roundtrip();
 
     printf("\n--- Emitter tests: %d / %d passed ---\n", tests_passed, tests_run);

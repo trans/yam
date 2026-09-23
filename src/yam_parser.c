@@ -1079,8 +1079,10 @@ static yam_status parse_block_sequence(yam_parser *p, int seq_indent) {
 
         yam_token_type tt = tok_type(p);
 
-        /* empty entry */
-        if (tt == YAM_TOK_BLOCK_SEQ_ENTRY && tok_col(p) == seq_indent) {
+        /* empty entry: an entry's content is indented past its '-', so
+         * anything at or left of the '-' (the next '-', a ':' of an
+         * enclosing explicit entry, ...) comes after it */
+        if (tok_col(p) <= seq_indent) {
             emit_empty(p);
             continue;
         }
@@ -1096,6 +1098,14 @@ static yam_status parse_block_sequence(yam_parser *p, int seq_indent) {
     }
 
     return YAM_OK;
+}
+
+/* Is the current token an implicit key's ':'? It must be on the line where
+ * the key ends: a ':' starting a later line belongs to an explicit "?"
+ * entry or an enclosing mapping. */
+static inline bool key_colon_follows(yam_parser *p, size_t key_end_line) {
+    return tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE && !in_flow(p) &&
+           p->current.start.line == key_end_line;
 }
 
 /* ── Parse block node (may be scalar, collection, alias, flow) ── */
@@ -1190,7 +1200,7 @@ static yam_status parse_block_node(yam_parser *p) {
             st = peek_token(p);
             if (st != YAM_OK) return st;
 
-            if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE && !in_flow(p)) {
+            if (key_colon_follows(p, evt.end.line)) {
                 /* mapping — outer props go on +MAP */
                 yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
                 map_evt.start = evt.start;
@@ -1278,21 +1288,14 @@ static yam_status parse_block_node(yam_parser *p) {
             return YAM_OK;
         }
 
-        /* Flow collection with double props — outer props go on implicit
-         * block mapping, inner props go on the flow collection, which
-         * becomes a complex key if followed by ':'. */
+        /* Flow collection with double props. If ':' follows, the collection
+         * is the first key of an implicit block mapping that takes the
+         * outer props; otherwise both sets of props are the collection's. */
         if (tt == YAM_TOK_FLOW_SEQ_START || tt == YAM_TOK_FLOW_MAP_START) {
-            int flow_col = col;
+            int key_col = p->current.start.line == inner_line ? inner_col : col;
             yam_mark flow_open = p->current.start;
             yam_mark flow_open_end = p->current.end;
-            /* Emit mapping start with outer props first */
-            yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
-            map_evt.anchor = saved_anchor;
-            map_evt.tag = saved_tag;
-            map_evt.start = saved_props_start;
-            map_evt.end = saved_props_start;
-            enqueue(p, &map_evt);
-            push_ctx(p, CTX_BLOCK_MAP, flow_col);
+            int coll_idx = p->evt_len;   /* where the collection starts */
 
             /* Parse the flow collection directly (not via parse_block_node,
              * to avoid double complex-key detection).
@@ -1303,24 +1306,18 @@ static yam_status parse_block_node(yam_parser *p) {
             p->pending_tag = YAM_STR_NULL;
 
             consume_token(p);
+            yam_event cevt = evt_simple(tt == YAM_TOK_FLOW_SEQ_START ? YAM_EVT_SEQUENCE_START
+                                                                    : YAM_EVT_MAPPING_START);
+            cevt.flow = true;
+            cevt.start = flow_open;
+            cevt.end = flow_open_end;
+            if (inner_has_anchor) cevt.anchor = inner_anchor;
+            if (inner_has_tag) cevt.tag = inner_tag;
+            enqueue(p, &cevt);
             if (tt == YAM_TOK_FLOW_SEQ_START) {
-                yam_event sevt = evt_simple(YAM_EVT_SEQUENCE_START);
-                sevt.flow = true;
-                sevt.start = flow_open;
-                sevt.end = flow_open_end;
-                if (inner_has_anchor) sevt.anchor = inner_anchor;
-                if (inner_has_tag) sevt.tag = inner_tag;
-                enqueue(p, &sevt);
                 push_ctx(p, CTX_FLOW_SEQ, col);
                 st = parse_flow_sequence(p);
             } else {
-                yam_event mevt = evt_simple(YAM_EVT_MAPPING_START);
-                mevt.flow = true;
-                mevt.start = flow_open;
-                mevt.end = flow_open_end;
-                if (inner_has_anchor) mevt.anchor = inner_anchor;
-                if (inner_has_tag) mevt.tag = inner_tag;
-                enqueue(p, &mevt);
                 push_ctx(p, CTX_FLOW_MAP, col);
                 st = parse_flow_mapping(p);
             }
@@ -1329,12 +1326,31 @@ static yam_status parse_block_node(yam_parser *p) {
             st = peek_token(p);
             if (st != YAM_OK) return st;
 
-            if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE) {
-                st = parse_block_map_value(p, flow_col);
-                if (st != YAM_OK) return st;
-                st = parse_block_mapping(p, flow_col);
-                if (st != YAM_OK) return st;
+            if (tok_type(p) != YAM_TOK_BLOCK_MAP_VALUE) {
+                /* not a key: both sets of props are the collection's */
+                if ((inner_has_anchor && had_anchor) || (inner_has_tag && had_tag))
+                    PARSE_ERROR(p, "a node cannot have two anchors or two tags");
+                if (had_anchor) p->events[coll_idx].anchor = saved_anchor;
+                if (had_tag) p->events[coll_idx].tag = saved_tag;
+                p->has_anchor = false;
+                p->has_tag = false;
+                p->pending_anchor = YAM_STR_NULL;
+                p->pending_tag = YAM_STR_NULL;
+                return YAM_OK;
             }
+
+            /* a key: the mapping (with the outer props) starts before it */
+            yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
+            map_evt.anchor = saved_anchor;
+            map_evt.tag = saved_tag;
+            map_evt.start = saved_props_start;
+            map_evt.end = saved_props_start;
+            if (!insert_event(p, coll_idx, &map_evt)) return OOM_STATUS(p);
+            push_ctx(p, CTX_BLOCK_MAP, key_col);
+            st = parse_block_map_value(p, key_col);
+            if (st != YAM_OK) return st;
+            st = parse_block_mapping(p, key_col);
+            if (st != YAM_OK) return st;
             {
                 yam_event end_evt = evt_simple(YAM_EVT_MAPPING_END);
                 end_evt.start = p->current.start;
@@ -1374,7 +1390,7 @@ static yam_status parse_block_node(yam_parser *p) {
         st = peek_token(p);
         if (st != YAM_OK) return st;
 
-        if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE && !in_flow(p)) {
+        if (key_colon_follows(p, evt.end.line)) {
             /* alias is a key in a new block mapping — props go on mapping */
             yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
             map_evt.start = evt.start;
@@ -1427,7 +1443,7 @@ static yam_status parse_block_node(yam_parser *p) {
          * Don't wrap if the ':' belongs to an existing parent block mapping. */
         st = peek_token(p);
         if (st != YAM_OK) return st;
-        if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE && !in_flow(p)) {
+        if (key_colon_follows(p, p->events[p->evt_len - 1].end.line)) {
             ctx_entry *fctx = top_ctx(p);
             bool colon_in_parent = fctx && fctx->type == CTX_BLOCK_MAP &&
                                    tok_col(p) == fctx->indent;
@@ -1475,7 +1491,7 @@ static yam_status parse_block_node(yam_parser *p) {
         /* Check if this flow map was a complex key (followed by ':') */
         st = peek_token(p);
         if (st != YAM_OK) return st;
-        if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE && !in_flow(p)) {
+        if (key_colon_follows(p, p->events[p->evt_len - 1].end.line)) {
             ctx_entry *fmctx = top_ctx(p);
             bool colon_in_parent2 = fmctx && fmctx->type == CTX_BLOCK_MAP &&
                                     tok_col(p) == fmctx->indent;
@@ -1585,7 +1601,7 @@ static yam_status parse_block_node(yam_parser *p) {
         st = peek_token(p);
         if (st != YAM_OK) return st;
 
-        if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE && !in_flow(p)) {
+        if (key_colon_follows(p, scalar_line)) {
             int colon_col = tok_col(p);
             /* The effective key column considers props on the same line:
              * e.g., "!!str a:" has effective col = 0 (the tag col) */
@@ -1681,9 +1697,10 @@ static yam_status parse_block_node(yam_parser *p) {
         yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
         map_evt.start = p->current.start;
         map_evt.end = p->current.end;
-        /* if we have props, they belong on the empty key, not the mapping.
-         * Use props column as mapping indent since props precede the colon. */
-        if (p->has_anchor || p->has_tag) {
+        /* props on the colon's line belong on the empty key ("&k : v"),
+         * and the mapping starts at them; props on an earlier line belong
+         * on the mapping (handled by attach below) */
+        if ((p->has_anchor || p->has_tag) && p->props_line == p->current.start.line) {
             int map_col = p->props_col;
             map_evt.start = p->props_start;
             map_evt.end = p->props_start;
@@ -1700,6 +1717,7 @@ static yam_status parse_block_node(yam_parser *p) {
             if (st != YAM_OK) return st;
             st = parse_block_mapping(p, map_col);
         } else {
+            attach_props(p, &map_evt);
             enqueue(p, &map_evt);
             push_ctx(p, CTX_BLOCK_MAP, col);
             st = parse_block_mapping(p, col);
@@ -4053,8 +4071,10 @@ static yam_status parser_step(yam_parser *p) {
         top = inc_top_frame(p);
         int seq_indent = top ? top->indent : 0;
 
-        /* empty entry: next '-' at same indent, or end of seq */
-        if (tt == YAM_TOK_BLOCK_SEQ_ENTRY && col == seq_indent) {
+        /* empty entry: an entry's content is indented past its '-', so
+         * anything at or left of it (the next '-', an enclosing ':', ...)
+         * comes after the entry */
+        if (col <= seq_indent && tt != YAM_TOK_STREAM_END) {
             evt = evt_simple(YAM_EVT_SCALAR);
             evt.implicit = true;
             evt.start = p->current.start;

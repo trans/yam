@@ -72,6 +72,8 @@ struct yam_scanner {
     int          explicit_depth;   /* ... at this flow depth */
     size_t       key_colon_line;   /* line of the last block implicit-key ':' */
     size_t       node_start;       /* start offset of the last noted node */
+    size_t       props_end;        /* end offset of the last anchor/tag run */
+    int          props_col;        /* 0-based column where that run starts */
     size_t       indicator_end;    /* offset just past the last block - ? : */
 
     /* error context */
@@ -237,6 +239,22 @@ static inline void note_node(yam_scanner *s, yam_mark start, size_t end) {
     s->node_line = start.line;
     s->node_start = start.offset;
     s->node_end = end;
+}
+
+/* Only blanks (on one line) between offsets `from` and `to`? */
+static bool only_blanks_between(const yam_scanner *s, size_t from, size_t to) {
+    if (from == SIZE_MAX || from > to) return false;
+    for (size_t i = from; i < to; i++)
+        if (s->buf[i] != ' ' && s->buf[i] != '\t') return false;
+    return true;
+}
+
+/* Record an anchor or tag token spanning [start, end): consecutive props
+ * on a line form one run, which starts at the first of them. */
+static void note_props(yam_scanner *s, yam_mark start, size_t end) {
+    if (!only_blanks_between(s, s->props_end, start.offset))
+        s->props_col = (int)start.col - 1;
+    s->props_end = end;
 }
 
 /* Is the whitespace between the last block indicator (- ? :) and offset
@@ -568,6 +586,10 @@ static yam_status scan_plain_scalar(yam_scanner *s, yam_token *tok) {
             continue;
         }
 
+        /* control characters are not allowed in YAML text */
+        if (c < 0x20 || c == 0x7F)
+            SCAN_ERROR(s, "control character in plain scalar");
+
         /* anything else is part of the scalar */
         if (in_buf) {
             APPEND_CHAR(s->buf[s->pos]);
@@ -872,13 +894,16 @@ static yam_status scan_tag(yam_scanner *s, yam_token *tok) {
          * closed by '>' */
         advance(s, 1);
         size_t uri_start = s->pos;
-        while (!AT_END(s) && PEEK(s) != '>' && !yam_is_blank_or_break(PEEK(s)))
+        while (!AT_END(s) && PEEK(s) != '>' && !yam_is_blank_or_break(PEEK(s))) {
+            if (PEEK(s) < 0x20 || PEEK(s) == 0x7F) SCAN_ERROR(s, "control character in tag");
             advance(s, 1);
+        }
         if (PEEK(s) != '>' || s->pos == uri_start)
             SCAN_ERROR(s, "invalid verbatim tag");
         advance(s, 1);
         size_t len = BUF_AT(s) - tag_start;
         s->last_token_col = (int)start.col - 1;
+        note_props(s, start, s->pos);
         *tok = (yam_token){
             .type  = YAM_TOK_TAG,
             .value = {tag_start, len},
@@ -891,11 +916,13 @@ static yam_status scan_tag(yam_scanner *s, yam_token *tok) {
     /* consume tag characters */
     while (!AT_END(s) && !yam_is_blank_or_break(PEEK(s))
            && !yam_is_flow(PEEK(s))) {
+        if (PEEK(s) < 0x20 || PEEK(s) == 0x7F) SCAN_ERROR(s, "control character in tag");
         advance(s, 1);
     }
 
     size_t len = BUF_AT(s) - tag_start;
     s->last_token_col = (int)start.col - 1;
+    note_props(s, start, s->pos);
     *tok = (yam_token){
         .type  = YAM_TOK_TAG,
         .value = {tag_start, len},
@@ -923,6 +950,7 @@ static yam_status scan_anchor_or_alias(yam_scanner *s, yam_token *tok) {
 
     s->last_token_col = (int)start.col - 1;
     if (!is_anchor) note_node(s, start, s->pos);
+    else note_props(s, start, s->pos);
     *tok = (yam_token){
         .type  = is_anchor ? YAM_TOK_ANCHOR : YAM_TOK_ALIAS,
         .value = {name_start, name_len},
@@ -975,6 +1003,7 @@ yam_scanner *yam_scanner_new(const char *input, size_t len, yam_arena *a) {
         .last_token_col       = 0,
         .node_end             = SIZE_MAX, /* no node seen yet */
         .indicator_end        = SIZE_MAX,
+        .props_end            = SIZE_MAX,
         .arena = a,
     };
 
@@ -1178,6 +1207,11 @@ yam_status yam_scan_token(yam_scanner *s, yam_token *tok) {
         if (s->flow_level == 0 && (yam_is_blank_or_break(next) || next == 0)) {
             int colon_col = (int)s->col - 1;
             int key_col = s->last_token_col;  /* 0-based col of the key */
+            /* props right before the key on its line ("&k key:") are part
+             * of it: the key starts where they do */
+            if (only_blanks_between(s, s->props_end, s->node_start) &&
+                s->node_end <= s->pos)
+                key_col = s->props_col;
             /* use minimum of key and colon column — handles explicit key
              * (? key\n: val) where colon_col is the mapping indent */
             int map_col = key_col < colon_col ? key_col : colon_col;

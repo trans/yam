@@ -319,6 +319,8 @@ static yam_scalar_style choose_style(yam_scalar_style requested,
     /* PLAIN requested — auto-detect */
     if (len == 0 && !is_str_tag(tag))
         return YAM_SCALAR_PLAIN;              /* empty (null) node */
+    if (needs_escape(val, len))
+        return YAM_SCALAR_DOUBLE_QUOTED;      /* control characters */
     if (!needs_quoting(val, len, flow_ctx)) {
         if (is_str_tag(tag) && (is_yaml_keyword(val, len) || looks_like_number(val, len)))
             return YAM_SCALAR_DOUBLE_QUOTED;
@@ -475,22 +477,52 @@ static yam_status emit_anchor(yam_emitter *e, yam_str anchor) {
     return buf_put(e, ' ');
 }
 
+/* URI characters allowed in a verbatim tag, besides alphanumerics */
+static bool is_uri_char(uint8_t c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+           (c && strchr("-#;/?:@&=+$,_.!~*'()[]", c));
+}
+
+/* Characters allowed in a shorthand tag's suffix: URI characters other
+ * than '!' and the flow indicators */
+static bool is_tag_char(uint8_t c) {
+    return is_uri_char(c) && c != '!' && !yam_is_flow(c);
+}
+
+static bool all_tag_chars(const char *s, size_t len) {
+    for (size_t i = 0; i < len; i++)
+        if (!is_tag_char((uint8_t)s[i])) return false;
+    return true;
+}
+
+/* Write a tag as "!!suffix" (standard tags), "!suffix" (local tags), or
+ * verbatim "!<...>" with any other byte percent-encoded; the parser
+ * decodes verbatim tags, so each form reads back as the same tag. */
 static yam_status emit_tag(yam_emitter *e, yam_str tag) {
     if (!tag.data || tag.len == 0) return YAM_OK;
     static const char prefix[] = "tag:yaml.org,2002:";
     static const size_t plen = sizeof(prefix) - 1;
 
     yam_status st;
-    if (tag.len > plen && memcmp(tag.data, prefix, plen) == 0) {
+    if (tag.len > plen && memcmp(tag.data, prefix, plen) == 0 &&
+        all_tag_chars(tag.data + plen, tag.len - plen)) {
         st = PUTS(e, "!!");
         if (st != YAM_OK) return st;
         st = buf_puts(e, tag.data + plen, tag.len - plen);
-    } else if (tag.data[0] == '!') {
+    } else if (tag.data[0] == '!' && all_tag_chars(tag.data + 1, tag.len - 1)) {
         st = buf_puts(e, tag.data, tag.len);
     } else {
         st = PUTS(e, "!<");
-        if (st != YAM_OK) return st;
-        st = buf_puts(e, tag.data, tag.len);
+        for (size_t i = 0; i < tag.len && st == YAM_OK; i++) {
+            uint8_t c = (uint8_t)tag.data[i];
+            if (is_uri_char(c)) {
+                st = buf_put(e, (char)c);
+            } else {
+                char esc[4];
+                snprintf(esc, sizeof esc, "%%%02X", c);
+                st = buf_puts(e, esc, 3);
+            }
+        }
         if (st != YAM_OK) return st;
         st = buf_put(e, '>');
     }
