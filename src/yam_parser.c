@@ -1587,6 +1587,17 @@ static yam_status parse_block_node(yam_parser *p) {
 
 /* ── Parse document ──────────────────────────────────────── */
 
+/* After a document's root node only a document boundary may follow. */
+static yam_status expect_document_end(yam_parser *p) {
+    yam_status st = peek_token(p);
+    if (st != YAM_OK) return st;
+    yam_token_type tt = tok_type(p);
+    if (tt != YAM_TOK_DOC_END && tt != YAM_TOK_DOC_START &&
+        tt != YAM_TOK_STREAM_END && tt != YAM_TOK_NONE)
+        PARSE_ERROR(p, "unexpected content after document root node");
+    return YAM_OK;
+}
+
 static yam_status parse_document(yam_parser *p) {
     if (p->oom) return OOM_STATUS(p);
     yam_status st = peek_token(p);
@@ -1671,6 +1682,8 @@ static yam_status parse_document(yam_parser *p) {
         } else {
             st = parse_block_node(p);
             if (st != YAM_OK) return st;
+            st = expect_document_end(p);
+            if (st != YAM_OK) return st;
         }
 
         return YAM_OK;
@@ -1705,7 +1718,7 @@ static yam_status parse_document(yam_parser *p) {
 
     st = parse_block_node(p);
     if (st != YAM_OK) return st;
-    return YAM_OK;
+    return expect_document_end(p);
 }
 
 /* ── Parse stream ────────────────────────────────────────── */

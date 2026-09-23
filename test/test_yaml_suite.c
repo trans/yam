@@ -517,7 +517,6 @@ static const char *known_accepted_invalid[] = {
     "8XDJ",
     "9C9N",
     "9CWY",
-    "9HCY",
     "9JBA",
     "9KBC",
     "9MAG",
@@ -537,15 +536,12 @@ static const char *known_accepted_invalid[] = {
     "EW3V",
     "G5U8",
     "G7JE",
-    "G9HC",
     "GDY7",
-    "GT5M",
     "H7J7",
     "H7TQ",
     "HU3P",
     "JKF3",
     "JY7Z",
-    "LHL4",
     "MUS6:0",
     "MUS6:1",
     "N4JP",
@@ -557,7 +553,6 @@ static const char *known_accepted_invalid[] = {
     "SF5V",
     "SR86",
     "SU5Z",
-    "SU74",
     "SY6V",
     "TD5N",
     "U44R",
@@ -585,7 +580,7 @@ static bool is_known_accepted(const char *label) {
     return false;
 }
 
-static test_result run_test(test_case *tc, bool verbose) {
+static test_result run_test(test_case *tc, bool verbose, bool eager) {
     size_t input_len = strlen(tc->yaml);
 
     /* skip tests with no expected tree (unless fail test) */
@@ -595,6 +590,10 @@ static test_result run_test(test_case *tc, bool verbose) {
     if (!arena) return RESULT_ERROR;
 
     yam_parser *parser = yam_parser_new(tc->yaml, input_len, arena);
+    /* Merge keys force the eager (whole-stream) parser; no suite case
+     * relies on merge semantics, so both modes must produce the same
+     * events and reject the same inputs. */
+    if (parser && eager) yam_parser_set_merge(parser, true);
     if (!parser) {
         yam_arena_free(arena);
         return RESULT_ERROR;
@@ -751,7 +750,14 @@ int main(int argc, char **argv) {
             if (tc->skip) continue;
             total++;
 
-            test_result result = run_test(tc, verbose);
+            /* run in both parse modes; the worse result counts */
+            test_result inc = run_test(tc, verbose, false);
+            test_result eag = run_test(tc, verbose, true);
+            test_result result = inc;
+            if (eag == RESULT_ERROR || (eag == RESULT_FAIL && inc != RESULT_ERROR))
+                result = eag;
+            if (inc != eag && result == RESULT_FAIL && verbose)
+                printf("    (%s mode only)\n", inc == RESULT_FAIL ? "incremental" : "eager");
 
             char label[320];
             if (ncases > 1)
