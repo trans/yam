@@ -2710,6 +2710,30 @@ static inline yam_status inc_flow_map_value(yam_parser *p) {
 
 /* Flow-context states. Kept out of parser_step so the block-context
  * dispatch stays compact; parser_step forwards every ST_FLOW_* state here. */
+/* After a document's root node: only '...', '---' or the end of the stream
+ * may follow. Emits DOC_END and moves on to the next document. */
+static yam_status inc_end_document(yam_parser *p) {
+    yam_status st = peek_token(p);
+    if (st != YAM_OK) return st;
+    yam_token_type tt = tok_type(p);
+    if (tt != YAM_TOK_DOC_END && tt != YAM_TOK_DOC_START &&
+        tt != YAM_TOK_STREAM_END)
+        PARSE_ERROR(p, "unexpected content after document root node");
+    yam_event evt = evt_simple(YAM_EVT_DOC_END);
+    if (tt == YAM_TOK_DOC_END) {
+        consume_token(p);
+        evt.implicit = false;
+    } else {
+        evt.implicit = true;
+    }
+    evt.start = p->current.start;
+    evt.end = p->current.end;
+    inc_emit(p, &evt);
+    p->doc_open = false;
+    p->state = ST_STREAM_DOC_LOOP;
+    return YAM_OK;
+}
+
 static yam_status parser_step_flow(yam_parser *p) {
     yam_token_type tt;
     int col;
@@ -3810,28 +3834,7 @@ static yam_status parser_step(yam_parser *p) {
 
         /* handle doc close for top-level mapping */
         p->state = frame.return_state;
-        if (p->state == ST_DOC_END_EXPLICIT) {
-            peek_token(p);
-            tt = tok_type(p);
-            if (tt == YAM_TOK_DOC_END) {
-                consume_token(p);
-                evt = evt_simple(YAM_EVT_DOC_END);
-                evt.implicit = false;
-                evt.start = p->current.start;
-                evt.end = p->current.end;
-                inc_emit(p, &evt);
-                p->doc_open = false;
-                p->state = ST_STREAM_DOC_LOOP;
-            } else {
-                evt = evt_simple(YAM_EVT_DOC_END);
-                evt.implicit = true;
-                evt.start = p->current.start;
-                evt.end = p->current.end;
-                inc_emit(p, &evt);
-                p->doc_open = false;
-                p->state = ST_STREAM_DOC_LOOP;
-            }
-        }
+        if (p->state == ST_DOC_END_EXPLICIT) return inc_end_document(p);
         return YAM_OK;
     }
 
@@ -3904,28 +3907,7 @@ static yam_status parser_step(yam_parser *p) {
         inc_emit(p, &evt);
 
         p->state = frame.return_state;
-        if (p->state == ST_DOC_END_EXPLICIT) {
-            peek_token(p);
-            tt = tok_type(p);
-            if (tt == YAM_TOK_DOC_END) {
-                consume_token(p);
-                evt = evt_simple(YAM_EVT_DOC_END);
-                evt.implicit = false;
-                evt.start = p->current.start;
-                evt.end = p->current.end;
-                inc_emit(p, &evt);
-                p->doc_open = false;
-                p->state = ST_STREAM_DOC_LOOP;
-            } else {
-                evt = evt_simple(YAM_EVT_DOC_END);
-                evt.implicit = true;
-                evt.start = p->current.start;
-                evt.end = p->current.end;
-                inc_emit(p, &evt);
-                p->doc_open = false;
-                p->state = ST_STREAM_DOC_LOOP;
-            }
-        }
+        if (p->state == ST_DOC_END_EXPLICIT) return inc_end_document(p);
         return YAM_OK;
     }
 
@@ -3949,31 +3931,8 @@ static yam_status parser_step(yam_parser *p) {
         return YAM_OK;
     }
 
-    case ST_DOC_END_EXPLICIT: {
-        peek_token(p);
-        tt = tok_type(p);
-        if (tt != YAM_TOK_DOC_END && tt != YAM_TOK_DOC_START &&
-            tt != YAM_TOK_STREAM_END)
-            PARSE_ERROR(p, "unexpected content after document root node");
-        if (tt == YAM_TOK_DOC_END) {
-            consume_token(p);
-            evt = evt_simple(YAM_EVT_DOC_END);
-            evt.implicit = false;
-            evt.start = p->current.start;
-            evt.end = p->current.end;
-            inc_emit(p, &evt);
-        } else {
-            evt = evt_simple(YAM_EVT_DOC_END);
-            evt.implicit = true;
-            peek_token(p);
-            evt.start = p->current.start;
-            evt.end = p->current.end;
-            inc_emit(p, &evt);
-        }
-        p->doc_open = false;
-        p->state = ST_STREAM_DOC_LOOP;
-        return YAM_OK;
-    }
+    case ST_DOC_END_EXPLICIT:
+        return inc_end_document(p);
 
     case ST_FLOW_NODE:
     case ST_FLOW_MAP_LOOP: case ST_FLOW_MAP_VALUE: case ST_FLOW_MAP_SEP:
