@@ -105,6 +105,10 @@ static void test_flow_keys(void) {
     check("k: v\n[c, d]: [e]\n", "{ k v [ c d ] [ e ] }");
     check("k: v\n{c: d}: e\n", "{ k v { c d } e }");
     check("k: v\n&a [c]: [e]\nz: 1\n", "{ k v &a [ c ] [ e ] z 1 }");
+    /* props before a first flow key; a flow key on the line after ':' */
+    check("&x [a]:\n[b]: c\n", "{ &x [ a ] ~ [ b ] c }");
+    check("x:\n [b]: c\n", "{ x { [ b ] c } }");
+    check("[a]:\n [b]: c\n", "{ [ a ] { [ b ] c } }");
 }
 
 /* Plain scalars containing quote or comment characters must not confuse
@@ -136,14 +140,22 @@ static void test_flow_empty_props(void) {
     check("&r\n&s a: b\nc: d\n", "&r { &s a b c d }");
     check("a: ? b\n", "{ a ERR");            /* '?' on an implicit key's line */
     check("? []\n[]\n", "{ [ ] ~ ERR");       /* flow key without ':' */
+    /* a flow-collection key: indentation counts from where it starts */
+    check("!!map {a: b}: |\n  # t\n", "{ { a b } # t\n }");
     /* a key with props on its line: indentation counts from the props */
     check("&r\n&k oo: |\n  a\n", "&r { &k oo a\n }");
     check("&r\n&k oo: a\n  b\nc: d\n", "&r { &k oo a b c d }");
+    /* props alone on a line in a mapping's key position */
+    check("top:\n  a: b\n  &k\ntop1: c\n", "{ top { a b ERR");
+    check("key:\n  &a\n  a: b\n", "{ key &a { a b } }");   /* value props: fine */
     /* props on the line before a bare ':' belong to the mapping */
     check("a: &m\n : &b\n*c : d\n", "{ a &m { ~ &b ~ } *c d }");
     /* an empty sequence entry before a shallower ':' */
     check("?\n  -\n:\n", "{ [ ~ ] ~ }");
     check("a\x01b: c\n", "ERR");           /* control character */
+    /* an explicit entry's ':' is at the mapping's indentation */
+    check("? b\n  : x\n", "{ b ERR");
+    check("- ? b\n  : x\n", "[ { b x } ]");
     /* a ':' starting a later line is not an implicit key's */
     check("? &x\n  k: *t\n: v\n", "{ &x { k *t } v }");
     /* props on two lines before a flow collection */
@@ -176,6 +188,7 @@ static void test_json(void) {
     check("{\"a\":\"x\",\"b\":'y'}", "{ a x b y }");
     check("[1, 2,]", "[ 1 2 ]");
     check("{\"a\" : 1 , \"b\":2}", "{ a 1 b 2 }");
+    check("{\"a\": b,:x: 1}", "{ a b :x 1 }");  /* ':' after ',' starts a plain scalar */
 }
 
 /* Quoted scalars without escapes are returned as slices of the input;

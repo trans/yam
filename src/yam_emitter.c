@@ -799,7 +799,11 @@ yam_status yam_emit(yam_emitter *e, const yam_event *evt) {
             st = buf_put(e, '}');
             if (st != YAM_OK) return st;
         } else if (ctx->count == 0) {
-            /* empty block mapping → {} */
+            /* empty block mapping → {} ("k: {}", "? {}") */
+            if (e->len > 0 && e->buf[e->len - 1] != ' ' && e->buf[e->len - 1] != '\n') {
+                st = buf_put(e, ' ');
+                if (st != YAM_OK) return st;
+            }
             st = PUTS(e, "{}");
             if (st != YAM_OK) return st;
         }
@@ -858,7 +862,11 @@ yam_status yam_emit(yam_emitter *e, const yam_event *evt) {
             st = buf_put(e, ']');
             if (st != YAM_OK) return st;
         } else if (ctx->count == 0) {
-            /* empty block sequence → [] */
+            /* empty block sequence → [] ("k: []", "? []") */
+            if (e->len > 0 && e->buf[e->len - 1] != ' ' && e->buf[e->len - 1] != '\n') {
+                st = buf_put(e, ' ');
+                if (st != YAM_OK) return st;
+            }
             st = PUTS(e, "[]");
             if (st != YAM_OK) return st;
         }

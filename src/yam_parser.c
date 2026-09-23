@@ -151,6 +151,7 @@ struct yam_parser {
     int          events_delivered; /* events returned to caller (for eager fallback skip) */
     yam_status   scan_error;      /* last scanner error (for incremental path) */
     int          scan_error_out;  /* out_len when scan_error was hit */
+    size_t       value_colon_line; /* line of the last block map value ':' */
 
     /* event handed out by the public yam_parse_next() */
     yam_event out_evt;
@@ -944,7 +945,12 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
                 if (st != YAM_OK) return st;
             }
 
-            /* parse value */
+            /* parse value: an explicit value's ':' is at the mapping's
+             * indentation */
+            st = peek_token(p);
+            if (st != YAM_OK) return st;
+            if (tok_type(p) == YAM_TOK_BLOCK_MAP_VALUE && tok_col(p) != map_indent)
+                PARSE_ERROR(p, "explicit mapping value must be at the mapping's indentation");
             st = parse_block_map_value(p, map_indent);
             if (st != YAM_OK) return st;
             continue;
@@ -976,6 +982,10 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
         if (st != YAM_OK) return st;
         tt = tok_type(p);
         col = tok_col(p);
+
+        /* an implicit key, props included, is on one line */
+        if ((p->has_anchor || p->has_tag) && p->current.start.line != p->props_line)
+            PARSE_ERROR(p, "mapping key properties must be on the key's line");
 
         /* key matches map indent if either the props or scalar is at map_indent */
         bool at_map_indent = (col == map_indent) || (key_start_col == map_indent);
@@ -1200,7 +1210,7 @@ static yam_status parse_block_node(yam_parser *p) {
             st = peek_token(p);
             if (st != YAM_OK) return st;
 
-            if (key_colon_follows(p, evt.end.line)) {
+            if (key_colon_follows(p, evt.start.line)) {
                 /* mapping — outer props go on +MAP */
                 yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
                 map_evt.start = evt.start;
@@ -1390,7 +1400,7 @@ static yam_status parse_block_node(yam_parser *p) {
         st = peek_token(p);
         if (st != YAM_OK) return st;
 
-        if (key_colon_follows(p, evt.end.line)) {
+        if (key_colon_follows(p, evt.start.line)) {
             /* alias is a key in a new block mapping — props go on mapping */
             yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
             map_evt.start = evt.start;
@@ -1422,7 +1432,9 @@ static yam_status parse_block_node(yam_parser *p) {
 
     /* flow sequence */
     if (tt == YAM_TOK_FLOW_SEQ_START) {
-        int flow_col = col;
+        /* a key with props on its line starts at them ("&x [a]: b") */
+        int flow_col = ((p->has_anchor || p->has_tag) &&
+                        p->props_line == p->current.start.line) ? p->props_col : col;
         /* Save queue position in case this is a complex key */
         int saved_evt_len = p->evt_len;
 
@@ -1472,7 +1484,9 @@ static yam_status parse_block_node(yam_parser *p) {
 
     /* flow mapping */
     if (tt == YAM_TOK_FLOW_MAP_START) {
-        int flow_col = col;
+        /* a key with props on its line starts at them ("&x [a]: b") */
+        int flow_col = ((p->has_anchor || p->has_tag) &&
+                        p->props_line == p->current.start.line) ? p->props_col : col;
         int saved_evt_len = p->evt_len;
 
         yam_mark open_start2 = p->current.start;
@@ -3617,9 +3631,11 @@ static yam_status parser_step(yam_parser *p) {
 
         if (tt == YAM_TOK_FLOW_SEQ_START || tt == YAM_TOK_FLOW_MAP_START) {
             /* Check if this flow collection is used as a complex block key
-             * ([flow]: value). Map values can't be keys; for other positions
-             * scan ahead to check if ':' follows the matching close bracket. */
-            if (p->node_return == ST_BLOCK_MAP_LOOP ||
+             * ([flow]: value). A map value on the ':' line can't be one
+             * ("k: [a]: b" is invalid); elsewhere, scan ahead to check if ':'
+             * follows the matching close bracket. */
+            if ((p->node_return == ST_BLOCK_MAP_LOOP &&
+                 p->current.start.line == p->value_colon_line) ||
                 !flow_is_block_key(p, p->current.start.offset)) {
                 p->state = ST_FLOW_NODE;
             } else {
@@ -3656,11 +3672,12 @@ static yam_status parser_step(yam_parser *p) {
         };
         consume_token(p);
 
-        /* peek for ':' → this scalar is a mapping key
-         * Only if ':' col >= scalar col (otherwise ':' belongs to parent map) */
+        /* peek for ':' → this scalar is a mapping key. The ':' must be on
+         * the scalar's line (an implicit key is one line; a block scalar,
+         * whose token ends on the next line, never is one) */
         peek_token(p);
         tt = tok_type(p);
-        if (tt == YAM_TOK_BLOCK_MAP_VALUE && tok_col(p) >= col) {
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE && p->current.start.line == evt.start.line) {
             p->saved_node = evt;
             p->saved_node_col = col;
             p->have_saved_node = true;
@@ -3712,7 +3729,7 @@ static yam_status parser_step(yam_parser *p) {
          * Only if ':' col >= alias col (otherwise ':' belongs to parent map) */
         peek_token(p);
         tt = tok_type(p);
-        if (tt == YAM_TOK_BLOCK_MAP_VALUE && tok_col(p) >= col) {
+        if (tt == YAM_TOK_BLOCK_MAP_VALUE && p->current.start.line == evt.start.line) {
             p->saved_node = evt;
             p->saved_node_col = col;
             p->have_saved_node = true;
@@ -3940,6 +3957,8 @@ static yam_status parser_step(yam_parser *p) {
 
         if (tt == YAM_TOK_BLOCK_MAP_VALUE && tok_col(p) == map_indent) {
             p->state = ST_BLOCK_MAP_VALUE;
+        } else if (tt == YAM_TOK_BLOCK_MAP_VALUE) {
+            PARSE_ERROR(p, "explicit mapping value must be at the mapping's indentation");
         } else {
             /* missing value → emit empty value, continue loop */
             evt = evt_simple(YAM_EVT_SCALAR);
@@ -3965,6 +3984,7 @@ static yam_status parser_step(yam_parser *p) {
             p->state = ST_BLOCK_MAP_LOOP;
             return YAM_OK;
         }
+        p->value_colon_line = p->current.start.line;
         consume_token(p);
 
         /* peek at what follows */

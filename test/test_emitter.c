@@ -498,6 +498,29 @@ static void test_tag_forms(void) {
     yam_arena_free(a);
 }
 
+/* Empty block collections as values and as keys */
+static void test_empty_block_collections(void) {
+    printf("test_empty_block_collections:\n");
+    yam_arena *a = yam_arena_new(4096);
+    yam_emitter *e = yam_emitter_new(a);
+    yam_str N = YAM_STR_NULL;
+    yam_emit_stream_start(e);
+    yam_emit_document_start(e, true);
+    yam_emit_mapping_start(e, N, N, false);
+    yam_emit_scalar(e, YAM_STR_LIT("k"), YAM_SCALAR_PLAIN, N, N);
+    yam_emit_sequence_start(e, N, N, false);
+    yam_emit_sequence_end(e);
+    yam_emit_sequence_start(e, N, N, false);      /* empty sequence as key */
+    yam_emit_sequence_end(e);
+    yam_emit_scalar(e, YAM_STR_LIT("v"), YAM_SCALAR_PLAIN, N, N);
+    yam_emit_mapping_end(e);
+    yam_emit_document_end(e, true);
+    yam_emit_stream_end(e);
+    ASSERT(str_eq(yam_emitter_output(e), "k: []\n? []\n: v\n"), "empty block collections");
+    yam_emitter_free(e);
+    yam_arena_free(a);
+}
+
 static void test_deep_block(void) {
     printf("test_deep_block:\n");
     yam_arena *a = yam_arena_new(4096);
@@ -530,6 +553,7 @@ int main(void) {
     test_block_value_placement();
     test_build_events();
     test_tag_forms();
+    test_empty_block_collections();
     test_roundtrip();
 
     printf("\n--- Emitter tests: %d / %d passed ---\n", tests_passed, tests_run);
