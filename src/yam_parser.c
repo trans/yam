@@ -979,10 +979,8 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
                 continue;
             }
 
-            /* not a key, just a value — this shouldn't really happen
-               in a well-formed mapping, but emit it and break */
-            enqueue(p, &evt);
-            break;
+            /* a scalar at the mapping's indentation must be a key */
+            PARSE_ERROR(p, "could not find expected ':' after mapping key");
         }
 
         /* alias as key */
@@ -1003,8 +1001,7 @@ static yam_status parse_block_mapping(yam_parser *p, int map_indent) {
                 if (st != YAM_OK) return st;
                 continue;
             }
-            enqueue(p, &evt);
-            break;
+            PARSE_ERROR(p, "could not find expected ':' after mapping key");
         }
 
         /* flow collection as key */

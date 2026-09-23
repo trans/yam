@@ -69,6 +69,7 @@ struct yam_scanner {
     size_t       node_end;         /* could be a key, and its end offset */
     bool         explicit_key;     /* a '?' awaits its ':' ... */
     int          explicit_depth;   /* ... at this flow depth */
+    size_t       key_colon_line;   /* line of the last block implicit-key ':' */
 
     /* error context */
     char      error_msg[256];
@@ -190,22 +191,41 @@ static inline void note_node(yam_scanner *s, size_t start_line, size_t end) {
     s->node_end = end;
 }
 
-/* Called for a ':' value indicator at the current position. An implicit key
- * (one not introduced by '?') must lie on a single line: if a node directly
- * precedes the ':' on its line, it must also start on that line. Flow
- * mappings are exempt (their keys may span lines). A ':' with no node
- * right before it on the line is left to the parser. */
-static bool implicit_key_ok(yam_scanner *s) {
-    if (s->explicit_key && s->explicit_depth == s->flows_len) {
+/* Classify a ':' value indicator at the current position. */
+enum { COLON_IMPLICIT, COLON_EXPLICIT, COLON_BAD_KEY };
+
+/* An implicit key (one not introduced by '?') must lie on a single line:
+ * if a node directly precedes the ':' on its line, it must also start on
+ * that line. In a flow sequence the ':' must also be on the key's line
+ * ("[ key\n : value ]" is invalid). Flow mappings are exempt (their keys
+ * may span lines). */
+static int classify_colon(yam_scanner *s) {
+    if (s->flows_len == 0) {
+        /* block context: an explicit value (or empty key) ':' starts its
+         * line; an implicit key's ':' never does */
+        size_t k = s->pos;
+        while (k > 0 && (s->buf[k - 1] == ' ' || s->buf[k - 1] == '\t')) k--;
+        if (k == 0 || s->buf[k - 1] == '\n' || s->buf[k - 1] == '\r') {
+            s->explicit_key = false;
+            return COLON_EXPLICIT;
+        }
+    } else if (s->explicit_key && s->explicit_depth == s->flows_len) {
         s->explicit_key = false; /* value of a '?' key: may span lines */
-        return true;
+        return COLON_EXPLICIT;
     }
-    if (s->node_line >= s->line) return true;
-    if (s->flows_len > 0 && s->flows[s->flows_len - 1].is_map) return true;
+    if (s->node_end > s->pos || s->node_line >= s->line) return COLON_IMPLICIT;
+    bool in_seq = false;
+    if (s->flows_len > 0) {
+        if (s->flows[s->flows_len - 1].is_map) return COLON_IMPLICIT;
+        in_seq = true;
+    }
     size_t j = s->pos;
-    if (s->node_end > j) return true; /* no node before this point */
-    while (j > s->node_end && (s->buf[j - 1] == ' ' || s->buf[j - 1] == '\t')) j--;
-    return j != s->node_end;
+    while (j > s->node_end) {
+        char c = s->buf[j - 1];
+        if (c == ' ' || c == '\t' || (in_seq && (c == '\n' || c == '\r'))) j--;
+        else break;
+    }
+    return j == s->node_end ? COLON_BAD_KEY : COLON_IMPLICIT;
 }
 
 /* ── Indent management ───────────────────────────────────── */
@@ -946,6 +966,11 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
     if (at_doc_indicator(s, '.')) {
         maybe_unroll_indents(s, -1);
         advance(s, 3);
+        /* only a comment may follow '...' on its line */
+        size_t k = s->pos;
+        while (k < s->len && (s->buf[k] == ' ' || s->buf[k] == '\t')) k++;
+        if (k < s->len && s->buf[k] != '#' && !yam_is_break((uint8_t)s->buf[k]))
+            SCAN_ERROR(s, "content after document end marker '...'");
         *tok = tok_simple(YAM_TOK_DOC_END, start, mark(s));
         return YAM_OK;
     }
@@ -1007,6 +1032,9 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
     if (c == '-' && s->flow_level == 0) {
         uint8_t next = PEEK_AT(s, 1);
         if (yam_is_blank_or_break(next) || next == 0) {
+            /* "key: - a" — a block sequence can't start on a key's line */
+            if (s->key_colon_line == s->line)
+                SCAN_ERROR(s, "block sequence entries are not allowed on the same line as a mapping key");
             int col = (int)s->col - 1;
             if (col > s->indent) {
                 indent_push(s, col);
@@ -1053,8 +1081,16 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
             /* use minimum of key and colon column — handles explicit key
              * (? key\n: val) where colon_col is the mapping indent */
             int map_col = key_col < colon_col ? key_col : colon_col;
-            if (!implicit_key_ok(s))
+            int kind = classify_colon(s);
+            if (kind == COLON_BAD_KEY)
                 SCAN_ERROR(s, "implicit key must be on a single line");
+            if (kind == COLON_IMPLICIT) {
+                /* "a: b: c" — a block mapping can't start on the line of
+                 * another implicit key */
+                if (s->key_colon_line == s->line)
+                    SCAN_ERROR(s, "mapping values are not allowed on the same line as another key");
+                s->key_colon_line = s->line;
+            }
             if (map_col > s->indent) {
                 indent_push(s, map_col);
             }
@@ -1068,7 +1104,7 @@ yam_status yam_scan_next(yam_scanner *s, yam_token *tok) {
              /* `:` after a JSON-like key (quoted scalar) */
              s->last_was_quoted)) {
             s->last_was_quoted = false; /* consumed */
-            if (!implicit_key_ok(s))
+            if (classify_colon(s) == COLON_BAD_KEY)
                 SCAN_ERROR(s, "implicit key must be on a single line");
             advance(s, 1);
             *tok = tok_simple(YAM_TOK_BLOCK_MAP_VALUE, start, mark(s));
