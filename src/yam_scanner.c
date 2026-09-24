@@ -64,7 +64,9 @@ struct yam_scanner {
     yam_arena   *arena;
 
     /* implicit-key check (see check_implicit_key) */
-    struct { yam_mark open; bool is_map; } *flows; /* open flow brackets */
+    struct { yam_mark open; bool is_map; int props_col; } *flows;
+                                   /* open flow brackets, with the column of
+                                    * props right before them (or -1) */
     int          flows_len, flows_cap;
     size_t       node_line;        /* start line of the last node that */
     size_t       node_end;         /* could be a key, and its end offset */
@@ -216,6 +218,8 @@ ALWAYS_INLINE const char *skip_blanks_and_comments(yam_scanner *s) {
 
 /* ── Flow bracket stack (for the implicit-key check) ─────── */
 
+static bool only_blanks_between(const yam_scanner *s, size_t from, size_t to);
+
 static bool flow_push(yam_scanner *s, bool is_map) {
     if (s->flows_len >= s->flows_cap) {
         int nc = s->flows_cap ? s->flows_cap * 2 : 16;
@@ -226,12 +230,23 @@ static bool flow_push(yam_scanner *s, bool is_map) {
     }
     s->flows[s->flows_len].open = mark(s);
     s->flows[s->flows_len].is_map = is_map;
+    s->flows[s->flows_len].props_col =
+        only_blanks_between(s, s->props_end, s->pos) ? s->props_col : -1;
     s->flows_len++;
     return true;
 }
 
+/* Close a flow collection. Returns its opening mark, and restores the
+ * record of props right before it (props inside it overwrote that). */
 static yam_mark flow_pop(yam_scanner *s) {
-    return s->flows_len > 0 ? s->flows[--s->flows_len].open : mark(s);
+    if (s->flows_len == 0) return mark(s);
+    s->flows_len--;
+    yam_mark open = s->flows[s->flows_len].open;
+    if (s->flows[s->flows_len].props_col >= 0) {
+        s->props_col = s->flows[s->flows_len].props_col;
+        s->props_end = open.offset;
+    }
+    return open;
 }
 
 /* Record a token that could be an implicit key: a flow scalar, an alias

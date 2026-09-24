@@ -149,6 +149,7 @@ struct yam_parser {
     parser_state unroll_return;
     parser_state node_return;  /* where to go after a block node completes */
     int          events_delivered; /* events returned to caller (for eager fallback skip) */
+    uint64_t     delivered_sig;    /* running signature of their types */
     yam_status   scan_error;      /* last scanner error (for incremental path) */
     int          scan_error_out;  /* out_len when scan_error was hit */
     size_t       value_colon_line; /* line of the last block map value ':' */
@@ -505,10 +506,9 @@ static yam_status consume_props(yam_parser *p) {
         if (st != YAM_OK) return st;
         if ((tok_type(p) == YAM_TOK_ANCHOR && !p->has_anchor) ||
             (tok_type(p) == YAM_TOK_TAG && !p->has_tag)) {
-            if (!(tok_type(p) == YAM_TOK_ANCHOR && p->has_tag &&
-                  p->current.start.line != p->props_line) &&
-                !props_continuation_ok(p))
-                PARSE_ERROR(p, "node properties must be indented more than the parent node");
+            /* a property on a new line not indented past the enclosing
+             * collection starts its next entry, not a continuation */
+            if (!props_continuation_ok(p)) break;
         }
         if (tok_type(p) == YAM_TOK_ANCHOR && !p->has_anchor) {
             /* If we already have a tag on a previous line and see an anchor
@@ -1797,6 +1797,11 @@ static yam_status parse_directive(yam_parser *p, bool *had_yaml) {
 
     if (!directive_word(&cur, end, &name, &name_len) || name != line.data + 1)
         PARSE_ERROR(p, "invalid directive");
+    for (size_t i = 0; i < line.len; i++) {
+        uint8_t c = (uint8_t)line.data[i];
+        if ((c < 0x20 && c != '\t') || c == 0x7F)
+            PARSE_ERROR(p, "control character in directive");
+    }
 
     if (name_len == 4 && memcmp(name, "YAML", 4) == 0) {
         if (*had_yaml) PARSE_ERROR(p, "duplicate %YAML directive");
@@ -2663,22 +2668,40 @@ static yam_status resolve_aliases(yam_parser *p) {
  * start of a token, and '#' only starts a comment after whitespace. So
  * plain scalars such as don't or a#b do not derail the scan. */
 
-/* Can a token start at input[i], judging by the byte before it? */
-static inline bool fk_token_boundary(const char *input, size_t i) {
-    if (i == 0) return true;
-    char c = input[i - 1];
+/* Can a token start at input[i]? Look back past blanks at what precedes:
+ * a token starts after a flow indicator, a line start, a closed quoted
+ * scalar or collection, a ':' / '?' / '-' indicator, or an anchor or tag;
+ * after other text we are inside a plain scalar (which may contain quote
+ * characters: "[a "b"]" is the one scalar 'a "b"'). */
+static bool fk_token_boundary(const char *input, size_t i) {
+    size_t j = i;
+    bool blank = false;
+    while (j > 0 && (input[j - 1] == ' ' || input[j - 1] == '\t')) { j--; blank = true; }
+    if (j == 0) return true;
+    char c = input[j - 1];
     switch (c) {
-    case ' ': case '\t': case '\n': case '\r':
-    case '[': case '{': case ',': case ']': case '}':
+    case '\n': case '\r':
+    case '[': case '{': case ',': case ']': case '}': case '"': case '\'':
         return true;
     case ':':
-        /* adjacent value after a JSON-like key: {"a":'b'} */
-        if (i < 2) return false;
-        c = input[i - 2];
-        return c == '"' || c == '\'' || c == ']' || c == '}';
+        /* a value indicator: followed by a blank, or adjacent to a
+         * JSON-like key ({"a":'b'}) */
+        if (blank) return true;
+        return j >= 2 && (input[j - 2] == '"' || input[j - 2] == '\'' ||
+                          input[j - 2] == ']' || input[j - 2] == '}');
+    case '?': case '-':
+        return blank;
     default:
-        return false;
+        break;
     }
+    if (!blank) return false;
+    /* after an anchor or tag ("&a 'x'", "!t 'x'") */
+    size_t w = j;
+    while (w > 0 && input[w - 1] != ' ' && input[w - 1] != '\t' &&
+           input[w - 1] != '\n' && input[w - 1] != '\r' && input[w - 1] != ',' &&
+           input[w - 1] != '[' && input[w - 1] != '{')
+        w--;
+    return input[w] == '&' || input[w] == '!';
 }
 
 /* Offset just past a quoted scalar whose opening quote is at `i`, or `len`
@@ -4264,8 +4287,18 @@ static yam_status next_event(yam_parser *p, yam_event *evt) {
             }
             if (p->merge_enabled || p->resolve_enabled)
                 unbind_anchors(p);
-            /* skip events already delivered during incremental phase */
+            /* skip events already delivered during incremental phase; they
+             * must be the ones the eager parse starts with */
             if (p->events_delivered > 0 && p->evt_cursor < p->events_delivered) {
+                uint64_t sig = 0;
+                for (int i = 0; i < p->events_delivered && i < p->evt_len; i++)
+                    sig = sig * 31 + (uint64_t)p->events[i].type;
+                if (p->events_delivered > p->evt_len || sig != p->delivered_sig) {
+                    p->stream_ended = true;
+                    PARSE_ERROR(p, "input not supported by the incremental parser "
+                                   "(please report); parse with merge keys or alias "
+                                   "resolution enabled");
+                }
                 p->evt_cursor = p->events_delivered;
                 p->events_delivered = 0;
             }
@@ -4285,6 +4318,7 @@ static yam_status next_event(yam_parser *p, yam_event *evt) {
             p->out_cursor = 0;
         }
         p->events_delivered++;
+        p->delivered_sig = p->delivered_sig * 31 + (uint64_t)evt->type;
         return YAM_OK;
     }
 
@@ -4357,6 +4391,7 @@ static yam_status next_event(yam_parser *p, yam_event *evt) {
         p->out_cursor = 0;
     }
     p->events_delivered++;
+    p->delivered_sig = p->delivered_sig * 31 + (uint64_t)evt->type;
     return YAM_OK;
 }
 

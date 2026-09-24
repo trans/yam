@@ -120,6 +120,9 @@ static void test_flow_keys_plain_quotes(void) {
     check("[ [a#b]: c ]", "[ { [ a#b ] c } ]");
     check("[ [a\"b]: c ]", "[ { [ a\"b ] c } ]");
     check("[ don't, [x] ]", "[ don't [ x ] ]");
+    /* a quote after a blank inside a plain scalar doesn't start a string */
+    check("[a \"b\", [c]: d]", "[ a \"b\" { [ c ] d } ]");
+    check("[ [a]: b, {c: d}: x  \"y]: g ]", "{ [ { [ a ] b } { { c d } x  \"y } ] g ] }");
     check("[ ['it''s', \"q\\\"]\"]: v ]", "[ { [ it's q\"] ] v } ]");
     check("[ [a] # c: d\n]", "[ [ a ] ]");
 }
@@ -133,6 +136,7 @@ static void test_flow_empty_props(void) {
     check("[&a ]", "[ &a ~ ]");
     check("[&a x: y]", "[ { &a x y } ]");
     check("{a: &b , c: d}", "{ a &b ~ c d }");
+    check("k: &a\n!t :\n", "{ k &a ~ ~ ~ }");   /* next entry: tagged empty key */
     /* props on an empty value, then a sibling entry with props */
     check("k: &a\n&b x: y\n", "{ k &a ~ &b x y }");
     check("a: b\n&k : v\n", "{ a b &k ~ v }");
@@ -142,6 +146,7 @@ static void test_flow_empty_props(void) {
     check("? []\n[]\n", "{ [ ] ~ ERR");       /* flow key without ':' */
     /* a flow-collection key: indentation counts from where it starts */
     check("!!map {a: b}: |\n  # t\n", "{ { a b } # t\n }");
+    check("&r\n&k {a: &n }: |\n  x\n", "&r { &k { a &n ~ } x\n }");  /* props inside */
     /* a key with props on its line: indentation counts from the props */
     check("&r\n&k oo: |\n  a\n", "&r { &k oo a\n }");
     check("&r\n&k oo: a\n  b\nc: d\n", "&r { &k oo a b c d }");
@@ -153,6 +158,7 @@ static void test_flow_empty_props(void) {
     /* an empty sequence entry before a shallower ':' */
     check("?\n  -\n:\n", "{ [ ~ ] ~ }");
     check("a\x01b: c\n", "ERR");           /* control character */
+    check("%TAG ! a\x01b\n--- x\n", "ERR"); /* ... in a directive */
     /* an explicit entry's ':' is at the mapping's indentation */
     check("? b\n  : x\n", "{ b ERR");
     check("- ? b\n  : x\n", "[ { b x } ]");
