@@ -11,7 +11,7 @@
 #                (the fair comparison: events, no tree)
 #   CASES        directory of extra input files to benchmark too
 #   CPU          core to pin to with taskset (default 3; empty disables)
-#   CC, CXX, CFLAGS, CXXFLAGS  compilers and flags (default -O2 -march=native)
+#   CC, CXX, CFLAGS, CXXFLAGS  compilers and flags (default -O2)
 set -e
 
 SIZE=${1:-10}
@@ -19,8 +19,8 @@ RUNS=${2:-15}
 CPU=${CPU-3}
 CC=${CC:-cc}
 CXX=${CXX:-c++}
-CFLAGS=${CFLAGS:--O2 -march=native}
-CXXFLAGS=${CXXFLAGS:--O2 -march=native -DNDEBUG}
+CFLAGS=${CFLAGS:--O2}
+CXXFLAGS=${CXXFLAGS:--O2 -DNDEBUG}
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)

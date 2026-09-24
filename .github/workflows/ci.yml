@@ -21,9 +21,8 @@ jobs:
         with:
           submodules: true   # yaml-test-suite
 
-      # Portable flags: the Makefile default (-march=native) is for local use
       - name: Build and run all tests
-        run: make CC=${{ matrix.cc }} CFLAGS=-O2 test-all
+        run: make CC=${{ matrix.cc }} test-all
 
   sanitize:
     name: Sanitizers (ASan + UBSan)

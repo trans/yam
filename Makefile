@@ -1,12 +1,10 @@
 CC      ?= gcc
 
-# Optimization / arch flags. Overridable so distro packaging can supply its
-# own portable, hardened flags. NOTE: -march=native is a convenience for local
-# dev/bench only — it is NOT portable, so redistributable builds must override
-# CFLAGS (the packaging targets and distro build systems do this). SIMD no
-# longer depends on it: yam_simd.c selects an SSE4.2 or scalar implementation
-# at runtime, so a portable build still uses SIMD on capable CPUs.
-CFLAGS  ?= -O2 -march=native
+# Optimization flags. Overridable so distro packaging can supply its own
+# hardened flags. The default is portable: SIMD doesn't need -march=native
+# (yam_simd.c selects an SSE4.2 or scalar implementation at runtime), and
+# it measured no faster, while its binaries can crash on older CPUs.
+CFLAGS  ?= -O2
 
 WARNINGS := -Wall -Wextra -Wpedantic
 
