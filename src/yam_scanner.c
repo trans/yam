@@ -642,12 +642,7 @@ static yam_status scan_single_quoted(yam_scanner *s, yam_token *tok) {
 
     /* fast path: no '' escapes or line breaks → zero-copy slice of the input */
     {
-        size_t j = s->pos;
-        while (j < s->len) {
-            char c = s->buf[j];
-            if (c == '\'' || c == '\n' || c == '\r') break;
-            j++;
-        }
+        size_t j = s->pos + yam_find_any4_short(BUF_AT(s), REMAINING(s), '\'', '\n', '\r', '\'');
         if (j < s->len && s->buf[j] == '\'' &&
             !(j + 1 < s->len && s->buf[j + 1] == '\'')) {
             yam_str val = {s->buf + s->pos, j - s->pos};
@@ -711,9 +706,12 @@ static yam_status scan_single_quoted(yam_scanner *s, yam_token *tok) {
                     buf[out++] = '\n';
             }
         } else {
-            SQ_ENSURE(1);
-            buf[out++] = s->buf[s->pos];
-            advance(s, 1);
+            /* a run of ordinary bytes, up to the next quote or break */
+            size_t n = yam_find_any4(BUF_AT(s), REMAINING(s), '\'', '\n', '\r', '\'');
+            SQ_ENSURE(n);
+            memcpy(buf + out, BUF_AT(s), n);
+            out += n;
+            advance_cols(s, n);
         }
     }
 
@@ -736,12 +734,7 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
 
     /* fast path: no escapes or line breaks → zero-copy slice of the input */
     {
-        size_t j = s->pos;
-        while (j < s->len) {
-            char c = s->buf[j];
-            if (c == '"' || c == '\\' || c == '\n' || c == '\r') break;
-            j++;
-        }
+        size_t j = s->pos + yam_find_any4_short(BUF_AT(s), REMAINING(s), '"', '\\', '\n', '\r');
         if (j < s->len && s->buf[j] == '"') {
             yam_str val = {s->buf + s->pos, j - s->pos};
             s->col += j + 1 - s->pos;
@@ -758,13 +751,15 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
     /* pre-scan for length */
     size_t max_len = 0;
     size_t scan = s->pos;
-    while (scan < s->len && s->buf[scan] != '"') {
-        if (s->buf[scan] == '\\') {
-            if (scan + 1 < s->len && (s->buf[scan+1] == 'N' || s->buf[scan+1] == '_'))
-                max_len++; /* 2-byte UTF-8 output */
-            scan++; /* skip escaped char */
-        }
-        scan++;
+    while (scan < s->len) {
+        size_t n = yam_find_any4(s->buf + scan, s->len - scan, '"', '\\', '"', '"');
+        scan += n;
+        max_len += n;
+        if (scan >= s->len || s->buf[scan] == '"') break;
+        /* a backslash and the escaped byte: one output byte (two for \N, \_) */
+        if (scan + 1 < s->len && (s->buf[scan+1] == 'N' || s->buf[scan+1] == '_'))
+            max_len++; /* 2-byte UTF-8 output */
+        scan += 2;
         max_len++;
     }
 
@@ -881,10 +876,15 @@ static yam_status scan_double_quoted(yam_scanner *s, yam_token *tok) {
                     buf[out++] = '\n';
             }
         } else {
-            uint8_t ch = (uint8_t)s->buf[s->pos];
-            buf[out++] = s->buf[s->pos];
-            advance(s, 1);
-            if (!yam_is_blank(ch)) content_end = out;
+            /* a run of ordinary bytes, up to the next quote, escape or break */
+            const char *run = BUF_AT(s);
+            size_t n = yam_find_any4(run, REMAINING(s), '"', '\\', '\n', '\r');
+            memcpy(buf + out, run, n);
+            size_t k = n;               /* trailing blanks don't count as content */
+            while (k > 0 && yam_is_blank((uint8_t)run[k - 1])) k--;
+            if (k > 0) content_end = out + k;
+            out += n;
+            advance_cols(s, n);
         }
     }
 
@@ -1438,7 +1438,7 @@ yam_status yam_scan_token(yam_scanner *s, yam_token *tok) {
             size_t tp = s->pos;
             int cnt = 0;
             while (tp < end_pos) {
-                while (tp < end_pos && !yam_is_break((uint8_t)s->buf[tp])) tp++;
+                tp += yam_scan_to_break(s->buf + tp, end_pos - tp);
                 cnt++;
                 if (tp < end_pos && s->buf[tp] == '\r') tp++;
                 if (tp < end_pos && s->buf[tp] == '\n') tp++;

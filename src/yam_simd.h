@@ -27,6 +27,47 @@ size_t yam_scan_to_break(const char *buf, size_t len);
 /* Scan to end of comment (to line break or EOF) — same as scan_to_break. */
 #define yam_skip_comment yam_scan_to_break
 
+/* Offset of the first byte in buf[0..len) equal to a, b, c or d, or `len`.
+ * Inline because quoted scalars are usually short. SSE2 is part of
+ * x86-64, so no runtime dispatch. */
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
+
+static inline size_t yam_find_any4(const char *buf, size_t len,
+                                   char a, char b, char c, char d) {
+    size_t i = 0;
+#if defined(__SSE2__)
+    const __m128i va = _mm_set1_epi8(a), vb = _mm_set1_epi8(b);
+    const __m128i vc = _mm_set1_epi8(c), vd = _mm_set1_epi8(d);
+    for (; i + 16 <= len; i += 16) {
+        __m128i v = _mm_loadu_si128((const __m128i *)(buf + i));
+        __m128i m = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(v, va), _mm_cmpeq_epi8(v, vb)),
+                                 _mm_or_si128(_mm_cmpeq_epi8(v, vc), _mm_cmpeq_epi8(v, vd)));
+        int mask = _mm_movemask_epi8(m);
+        if (mask) return i + (size_t)__builtin_ctz((unsigned)mask);
+    }
+#endif
+    for (; i < len; i++) {
+        char x = buf[i];
+        if (x == a || x == b || x == c || x == d) return i;
+    }
+    return len;
+}
+
+/* yam_find_any4 for text that is usually short (a quoted key or JSON
+ * value): a few plain compares finish most of it before SIMD setup would
+ * pay off. */
+static inline size_t yam_find_any4_short(const char *buf, size_t len,
+                                         char a, char b, char c, char d) {
+    size_t i = 0;
+    for (; i < len && i < 8; i++) {
+        char x = buf[i];
+        if (x == a || x == b || x == c || x == d) return i;
+    }
+    return i + yam_find_any4(buf + i, len - i, a, b, c, d);
+}
+
 /* Bitmask of the bytes the flow-key lookahead looks at in the 64 bytes at
  * p (all must be readable): bit k is set if p[k] is one of ' " # [ ] { }
  * \n \r. Inline, since it runs once per 64 input bytes in a hot loop; SSE2
