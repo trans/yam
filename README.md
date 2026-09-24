@@ -7,9 +7,10 @@ an event-based parser, an emitter with block/flow/minimal output styles,
 merge key expansion, alias resolution, file input, structured error messages,
 and an arena allocator. Against the
 [YAML Test Suite](https://github.com/yaml/yaml-test-suite), it produces the
-exact expected event stream for all 302 valid-YAML cases (6 more lack
-expected output in the suite itself), and rejects all 94 invalid-YAML
-cases. Every case is run through both parser modes.
+exact expected event stream for all 308 valid-YAML cases and rejects all 94
+invalid-YAML cases, in both parser modes (see
+[Conformance and Testing](#conformance-and-testing)). It parses 1.6–13×
+faster than libyaml and libfyaml (see [Performance](#performance)).
 
 One deliberate leniency: a line inside a flow collection or multi-line
 quoted scalar that starts with the closing bracket or quote may sit at any
@@ -34,6 +35,7 @@ make test-emitter # run emitter tests
 make test-merge   # run merge key tests
 make test-resolve # run alias resolution tests
 make test-errors  # run error handling tests
+make test-flow    # run flow collection and parser edge-case tests
 make test-suite   # run YAML Test Suite (requires git submodules)
 make test-all     # run all tests
 ```
@@ -377,27 +379,87 @@ simple key resolution, and property (anchor/tag) attachment.
 
 ## Performance
 
-Throughput on a 10 MB generated YAML document (GCC -O2 -march=native, SSE4.2):
+Parse throughput in MB/s (higher is better), measured with
+`make bench-compare` on an Intel Core Ultra 7 155H, one core, GCC 16.2
+`-O2`, median of 11 runs in each of 3 passes (passes agree within 5%).
+Every library parses the same bytes:
 
-```
-  Component                    Avg MB/s    Best MB/s
-  ──────────────────────────────────────────────────
-  Scanner                      408         419
-  Parser (block YAML)          167         169
-  Parser (mixed YAML)          212         214
-  Parser (JSON)                200         205
-```
+| Input | yam | libyaml 0.2.5 | libfyaml 0.9.6 | rapidyaml 0.16 (events) | rapidyaml 0.16 (tree) |
+|---|---:|---:|---:|---:|---:|
+| **Generated, 10 MB** | | | | | |
+| block mappings and sequences | 176 | 75 | 63 | 249 | 109 |
+| mixed block, flow and quoted | 216 | 88 | 76 | 285 | 119 |
+| JSON | 193 | 72 | 61 | 338 | 122 |
+| config files (comments, block scalars, anchors) | 206 | 125 | 106 | 368 | 196 |
+| **Real files, repeated to ~10 MB** | | | | | |
+| travis.yml | 501 | 149 | 183 | 434 | 202 |
+| appveyor.yml | 439 | 133 | 151 | 419 | 208 |
+| compile_commands.json | 2231 | 226 | 305 | 1247 | 867 |
+| **Scalar-heavy text** | | | | | |
+| literal block scalars (`\|`) | 3091 | 290 | 294 | 1024 | 936 |
+| folded block scalars (`>`) | 2087 | 292 | 295 | 921 | 853 |
+| multi-line double-quoted | 3006 | 224 | 345 | 362 | 348 |
+| multi-line single-quoted | 2748 | 225 | 346 | 376 | 369 |
+| multi-line plain | 886 | 209 | 441 | 312 | 307 |
 
-The parser uses an incremental state machine for both block and flow
-context YAML, with a byte-scanning lookahead to avoid eager fallback
-for nested flow collections. The lookahead result is cached for every
-collection nested inside the one scanned, so it stays linear however
-deeply collections nest. Quoted scalars without escapes or line breaks
-are returned as zero-copy slices of the input. Tags, schemas, merge keys, and alias
-resolution fall back to eager evaluation automatically.
+yam, libyaml and libfyaml are measured producing events. rapidyaml is
+shown two ways: its event parser (`EventHandlerInts`, with buffers reused
+between parses, its fastest mode) and its usual API, parsing in place into
+a new tree. The real files and scalar-heavy inputs come from rapidyaml's
+own benchmark set.
 
-Run `make bench` to test on your hardware. Use `make bench-cmp` to include
-a libyaml comparison (requires libyaml installed).
+yam is 1.6–3.4× faster than libyaml and libfyaml on structure-heavy input
+and up to 13× faster on scalar-heavy input. Against rapidyaml's event
+parser it is faster on the real configuration files and 2–8× faster on long
+scalars; rapidyaml leads on the generated structure-heavy inputs
+(1.3–1.8×), which are mostly short keys and values.
+
+Where the speed comes from:
+
+- The scanner finds structure 16 bytes at a time with SSE4.2 (chosen at
+  runtime, with a scalar fallback), and plain and quoted scalars without
+  escapes or line breaks are returned as zero-copy slices of the input.
+- Block scalars and quoted scalars with escapes or line breaks are copied a
+  line or run at a time, not byte by byte.
+- The parser is an incremental state machine for block and flow YAML
+  alike. Deciding whether a flow collection is a key needs a lookahead,
+  which walks a SIMD bitmask and is cached for every collection nested in
+  the one scanned, so it stays linear however deeply collections nest.
+- Tags, schemas, merge keys and alias resolution use an eager parse of the
+  whole document instead.
+
+Run `make bench` to measure yam alone. `make bench-compare` runs the table
+above with whichever libraries are installed; see `bench/compare/run.sh`
+for adding rapidyaml (`RYML_HEADER`, `RYML_SRC`) and your own files
+(`CASES`).
+
+## Conformance and Testing
+
+Graded on the [YAML Test Suite](https://github.com/yaml/yaml-test-suite)
+(v2022-01-17-9-gda267a5c; 308 valid and 94 invalid cases) by one script
+that compares each parser's events with the suite's:
+
+| Parser | Valid (308) | Invalid rejected (94) |
+|---|---:|---:|
+| yam | 308 | 94 |
+| libfyaml 0.9.6 | 308 | 94 |
+| rapidyaml 0.16, built with `RYML_WITH_TAB_TOKENS` | 299 | 93 |
+| rapidyaml 0.16, default build | 293 | 90 |
+| libyaml 0.2.5 | 252 | 78 |
+
+rapidyaml's default build rejects tabs after `:` and `-` (a documented
+choice), and its event output leaves `%TAG` shorthands unexpanded, which
+accounts for 9 of its differences. libyaml implements YAML 1.1.
+
+yam's own suite runner (`make test-suite`) also checks both of its parser
+modes and round-trips every valid case through the emitter in all three
+output styles. A libFuzzer harness (`fuzz/fuzz_parser.c`) checks that
+arbitrary input never crashes or exceeds the safety limits, and that
+whatever parses, emits and parses again to the same data. It runs for 3
+minutes on every push, and
+[ClusterFuzzLite](https://google.github.io/clusterfuzzlite/) runs it for
+hours a day under AddressSanitizer and UndefinedBehaviorSanitizer. CI
+builds and tests with GCC and Clang on Linux and macOS.
 
 ## License
 

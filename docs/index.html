@@ -405,10 +405,10 @@
         event-driven parsing, merge and alias support, and dependable error reporting.
       </p>
       <div class="stats">
-        <div class="stat"><strong>302/302</strong><span>Valid Suite Cases</span></div>
-        <div class="stat"><strong>663</strong><span>Total Tests</span></div>
-        <div class="stat"><strong>423 MB/s<sup>*</sup></strong><span>Scanner</span></div>
-        <div class="stat"><strong>172 MB/s<sup>*</sup></strong><span>Parser Avg</span></div>
+        <div class="stat"><strong>308/308</strong><span>Valid Suite Cases</span></div>
+        <div class="stat"><strong>961</strong><span>Total Tests</span></div>
+        <div class="stat"><strong>352 MB/s<sup>*</sup></strong><span>Scanner</span></div>
+        <div class="stat"><strong>195 MB/s<sup>*</sup></strong><span>Parser Avg</span></div>
       </div>
     </header>
 
@@ -481,14 +481,14 @@ while (yam_parse_next(parser, &evt) == YAM_OK) {
       <div class="grid-2">
         <article class="tile">
           <h3>Throughput (10 MB benchmark)*</h3>
-          <p><strong>Scanner:</strong> <span class="accent-green">423 MB/s</span> avg, 425 MB/s best</p>
-          <p><strong>Parser:</strong> <span class="accent-green">172 MB/s</span> avg across block, mixed, and JSON</p>
+          <p><strong>Scanner:</strong> <span class="accent-green">352 MB/s</span> avg, 356 MB/s best</p>
+          <p><strong>Parser:</strong> <span class="accent-green">195 MB/s</span> avg across block, mixed, and JSON; 1.6&ndash;13&times; faster than libyaml and libfyaml</p>
           <p><strong>SIMD:</strong> SSE4.2 <span class="fine-print">* Intel Core Ultra 7 155H</span></p>
         </article>
         <article class="tile">
           <h3>Test Status</h3>
-          <p>Exact event streams for all 302 valid YAML Test Suite cases.<br/>Rejects all 94 invalid cases.</p>
-          <p>Project test count: <strong>663 total tests, 0 failures</strong>.</p>
+          <p>Exact event streams for all 308 valid YAML Test Suite cases.<br/>Rejects all 94 invalid cases.</p>
+          <p>Project test count: <strong>961 total tests, 0 failures</strong>.</p>
         </article>
       </div>
     </section>
