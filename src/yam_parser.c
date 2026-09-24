@@ -12,6 +12,7 @@
  */
 
 #include "yam_internal.h"
+#include "yam_simd.h"
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2730,27 +2731,6 @@ static bool fk_token_boundary(const char *input, size_t i) {
     return input[w] == '&' || input[w] == '!';
 }
 
-/* Offset just past a quoted scalar whose opening quote is at `i`, or `len`
- * if it is unterminated. */
-static size_t fk_skip_quoted(const char *input, size_t len, size_t i) {
-    char q = input[i];
-    size_t j = i + 1;
-    for (;;) {
-        const char *hit = memchr(input + j, q, len - j);
-        if (!hit) return len;
-        size_t k = (size_t)(hit - input);
-        if (q == '\'') {
-            if (k + 1 < len && input[k + 1] == '\'') { j = k + 2; continue; }
-            return k + 1;
-        }
-        /* double-quoted: escaped if preceded by an odd run of backslashes */
-        size_t bs = 0;
-        while (k - bs > i + 1 && input[k - bs - 1] == '\\') bs++;
-        if (bs & 1) { j = k + 1; continue; }
-        return k + 1;
-    }
-}
-
 /* Is the byte after a closing bracket at `i` (skipping blanks, breaks and
  * comments) a ':'? */
 static bool fk_colon_follows(const char *input, size_t len, size_t i) {
@@ -2768,12 +2748,66 @@ static bool fk_colon_follows(const char *input, size_t len, size_t i) {
     return false;
 }
 
-/* Bytes the lookahead scan has to look at; everything else is skipped. */
-static const bool fk_special[256] = {
-    ['\''] = true, ['"'] = true, ['#'] = true,
-    ['['] = true, [']'] = true, ['{'] = true, ['}'] = true,
-    ['\n'] = true, ['\r'] = true,
-};
+/* The scan only stops at the bytes ' " # [ ] { } \n \r. A cursor walks
+ * them using a bitmask built 64 bytes at a time (yam_flow_mask64, SIMD on
+ * x86-64): bit k of `bits` marks a stop at base + k. Skipping a quoted
+ * scalar or comment walks the same bits, so no byte is examined twice. */
+typedef struct {
+    const char *in;
+    size_t      len;
+    size_t      base;
+    uint64_t    bits;
+} fk_cursor;
+
+static inline uint64_t fk_mask_at(const char *in, size_t len, size_t base) {
+    if (len - base >= 64) return yam_flow_mask64(in + base);
+    uint64_t m = 0;                      /* the last partial block */
+    for (size_t k = 0; base + k < len; k++) {
+        char c = in[base + k];
+        if (c == '\'' || c == '"' || c == '#' || c == '[' || c == ']' ||
+            c == '{' || c == '}' || c == '\n' || c == '\r')
+            m |= (uint64_t)1 << k;
+    }
+    return m;
+}
+
+/* Position the cursor so the next stop is the first at or after `pos`. */
+static inline void fk_seek(fk_cursor *c, size_t pos) {
+    c->base = pos;
+    c->bits = pos < c->len ? fk_mask_at(c->in, c->len, pos) : 0;
+}
+
+/* Offset of the next stop (consuming it), or `len` if there is none. */
+static inline size_t fk_next(fk_cursor *c) {
+    while (c->bits == 0) {
+        if (c->len - c->base <= 64) { c->base = c->len; return c->len; }
+        c->base += 64;
+        c->bits = fk_mask_at(c->in, c->len, c->base);
+    }
+    size_t k = (size_t)__builtin_ctzll(c->bits);
+    c->bits &= c->bits - 1;
+    return c->base + k;
+}
+
+/* Consume a quoted scalar whose opening quote is at `i`. Returns false if
+ * it is unterminated. */
+static bool fk_skip_quoted(fk_cursor *c, size_t i) {
+    const char *in = c->in;
+    char q = in[i];
+    for (;;) {
+        size_t k = fk_next(c);
+        if (k == c->len) return false;
+        if (in[k] != q) continue;
+        if (q == '\'') {
+            if (k + 1 < c->len && in[k + 1] == '\'') { fk_next(c); continue; } /* '' */
+            return true;
+        }
+        /* double-quoted: escaped if preceded by an odd run of backslashes */
+        size_t bs = 0;
+        while (k - bs > i + 1 && in[k - bs - 1] == '\\') bs++;
+        if (!(bs & 1)) return true;
+    }
+}
 
 static int fk_cmp(const void *a, const void *b) {
     size_t x = *(const size_t *)a, y = *(const size_t *)b;
@@ -2787,24 +2821,27 @@ static bool fk_scan(yam_parser *p, size_t offset) {
     const char *input = p->input;
     size_t len = p->input_len;
     int depth = 0;
+    fk_cursor cur = { input, len, 0, 0 };
 
     p->fk_valid = false;
     p->fk_nkeys = 0;
+    fk_seek(&cur, offset);
 
-    for (size_t i = offset; i < len; i++) {
-        while (!fk_special[(uint8_t)input[i]]) {
-            if (++i == len) goto unterminated;
-        }
-        char c = input[i];
-        switch (c) {
+    for (;;) {
+        size_t i = fk_next(&cur);
+        if (i == len) goto unterminated;
+        switch (input[i]) {
         case '\'': case '"':
-            if (fk_token_boundary(input, i)) i = fk_skip_quoted(input, len, i) - 1;
+            if (fk_token_boundary(input, i) && !fk_skip_quoted(&cur, i))
+                goto unterminated;
             break;
         case '#':
+            /* a comment runs to the next \n, which it consumes */
             if (i > 0 && (input[i - 1] == ' ' || input[i - 1] == '\t' ||
                           input[i - 1] == '\n' || input[i - 1] == '\r')) {
-                const char *nl = memchr(input + i, '\n', len - i);
-                i = nl ? (size_t)(nl - input) : len;
+                size_t k;
+                while ((k = fk_next(&cur)) != len && input[k] != '\n') {}
+                if (k == len) goto unterminated;
             }
             break;
         case '[': case '{':
