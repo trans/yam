@@ -536,8 +536,35 @@ static void test_deep_block(void) {
 
 /* ── Main ────────────────────────────────────────────────── */
 
+/* Found by the overnight fuzz run: a leading U+FEFF would be read back as
+ * a byte order mark, and a block collection nested in a flow collection
+ * (as alias expansion can produce) must be written in flow style. */
+static void test_fuzz_found_emit(void) {
+    printf("test_fuzz_found_emit:\n");
+    yam_arena *a = yam_arena_new(4096);
+    yam_emitter *e = yam_emitter_new(a);
+    yam_emit_stream_start(e);
+    yam_emit_document_start(e, true);
+    yam_emit_sequence_start(e, YAM_STR_NULL, YAM_STR_NULL, false);
+    yam_emit_scalar(e, YAM_STR_LIT("\xEF\xBB\xBFx"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_NULL);
+    yam_emit_sequence_start(e, YAM_STR_NULL, YAM_STR_NULL, true);   /* flow */
+    yam_emit_sequence_start(e, YAM_STR_NULL, YAM_STR_NULL, false);  /* block inside */
+    yam_emit_scalar(e, YAM_STR_LIT("a"), YAM_SCALAR_PLAIN, YAM_STR_NULL, YAM_STR_NULL);
+    yam_emit_sequence_end(e);
+    yam_emit_sequence_end(e);
+    yam_emit_sequence_end(e);
+    yam_emit_document_end(e, true);
+    ASSERT(yam_emit_stream_end(e) == YAM_OK, "event functions succeed");
+
+    yam_str out = yam_emitter_output(e);
+    ASSERT(!str_contains(out, "- \xEF\xBB\xBFx"), "leading U+FEFF is quoted");
+    ASSERT(str_contains(out, "[[a]]"), "block sequence inside flow is written as flow");
+    yam_arena_free(a);
+}
+
 int main(void) {
     test_flow_simple();
+    test_fuzz_found_emit();
     test_minimal_simple();
     test_block_mapping();
     test_block_sequence();

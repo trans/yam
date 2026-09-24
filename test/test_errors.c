@@ -193,6 +193,103 @@ static void test_empty_anchor(void) {
     yam_arena_free(a);
 }
 
+static void test_control_char_anchor(void) {
+    printf("test_control_char_anchor:\n");
+
+    const char *yaml = "&a\x10 x";
+    yam_arena *a = yam_arena_new(4096);
+    yam_scanner *s = yam_scanner_new(yaml, strlen(yaml), a);
+
+    const yam_token *tok;
+    yam_status st;
+    st = yam_scan_next(s, &tok); /* STREAM_START */
+    st = yam_scan_next(s, &tok);
+    ASSERT(st == YAM_ERR_SCAN, "control character in anchor returns error");
+    const char *msg = yam_scanner_error(s);
+    ASSERT(msg && strstr(msg, "control character"), "message mentions control character");
+
+    yam_scanner_free(s);
+    yam_arena_free(a);
+}
+
+/* A chain of anchors, each aliasing the previous one inside a sequence,
+ * is shallow as written but nests one level per link when expanded. The
+ * depth limit must hold for the expanded stream (found by fuzzing). */
+static void test_depth_limit_after_expansion(void) {
+    printf("test_depth_limit_after_expansion:\n");
+
+    char yaml[16384];
+    size_t n = (size_t)snprintf(yaml, sizeof yaml, "a0: &a0 [x]\n");
+    for (int i = 1; i < 300; i++)
+        n += (size_t)snprintf(yaml + n, sizeof yaml - n, "a%d: &a%d [*a%d]\n", i, i, i - 1);
+
+    for (int resolve = 0; resolve < 2; resolve++) {
+        yam_arena *a = yam_arena_new(4096);
+        yam_parser *p = yam_parser_new(yaml, n, a);
+        yam_parser_set_max_events(p, 0);
+        yam_parser_set_resolve(p, resolve);
+        const yam_event *evt;
+        yam_status st;
+        int depth = 0, max_depth = 0;
+        while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
+               evt->type != YAM_EVT_STREAM_END && evt->type != YAM_EVT_NONE) {
+            if (evt->type == YAM_EVT_SEQUENCE_START || evt->type == YAM_EVT_MAPPING_START)
+                if (++depth > max_depth) max_depth = depth;
+            if (evt->type == YAM_EVT_SEQUENCE_END || evt->type == YAM_EVT_MAPPING_END)
+                depth--;
+        }
+        if (resolve) {
+            ASSERT(st == YAM_ERR_LIMIT, "expanded nesting beyond the limit is an error");
+        } else {
+            ASSERT(st == YAM_OK && max_depth == 2, "unexpanded chain is shallow");
+        }
+        ASSERT(max_depth <= 256, "no event nests deeper than the limit");
+        yam_parser_free(p);
+        yam_arena_free(a);
+    }
+}
+
+/* A flow collection used as a key is parsed through a fallback path that
+ * used to skip the depth limit, and the incremental parser delivered the
+ * start event past the limit before failing (found by fuzzing). No event
+ * may nest deeper than the limit, whichever path parses it. */
+static void test_depth_limit_every_path(void) {
+    printf("test_depth_limit_every_path:\n");
+    const char *cases[] = { "[[[x]]]: y", "? ? {g}: x", "[[[[x]]]]", "- - - - x" };
+    for (size_t c = 0; c < sizeof cases / sizeof *cases; c++) {
+        for (int eager = 0; eager < 2; eager++) {
+            yam_arena *a = yam_arena_new(4096);
+            yam_parser *p = yam_parser_new(cases[c], strlen(cases[c]), a);
+            yam_parser_set_max_depth(p, 3);
+            if (eager) yam_parser_set_merge(p, true);
+            const yam_event *evt;
+            yam_status st;
+            int depth = 0, max_depth = 0;
+            while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
+                   evt->type != YAM_EVT_STREAM_END && evt->type != YAM_EVT_NONE) {
+                if (evt->type == YAM_EVT_SEQUENCE_START || evt->type == YAM_EVT_MAPPING_START)
+                    if (++depth > max_depth) max_depth = depth;
+                if (evt->type == YAM_EVT_SEQUENCE_END || evt->type == YAM_EVT_MAPPING_END)
+                    depth--;
+            }
+            ASSERT(st == YAM_ERR_LIMIT, "four levels exceed a limit of three");
+            ASSERT(max_depth <= 3, "no event is delivered past the limit");
+            yam_parser_free(p);
+            yam_arena_free(a);
+        }
+    }
+    const char *ok = "[[x]]: y";              /* exactly three levels */
+    yam_arena *a = yam_arena_new(4096);
+    yam_parser *p = yam_parser_new(ok, strlen(ok), a);
+    yam_parser_set_max_depth(p, 3);
+    const yam_event *evt;
+    yam_status st;
+    while ((st = yam_parse_next(p, &evt)) == YAM_OK && evt->type != YAM_EVT_STREAM_END) {}
+    ASSERT(st == YAM_OK, "nesting at the limit is fine");
+    yam_parser_free(p);
+    yam_arena_free(a);
+}
+
 /* ── Parser error tests ─────────────────────────────────────── */
 
 static void test_missing_flow_seq_end(void) {
@@ -513,6 +610,9 @@ int main(void) {
     test_unterminated_double_quote();
     test_invalid_escape();
     test_empty_anchor();
+    test_control_char_anchor();
+    test_depth_limit_after_expansion();
+    test_depth_limit_every_path();
 
     /* parser errors */
     test_missing_flow_seq_end();

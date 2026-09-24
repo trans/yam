@@ -259,6 +259,10 @@ static bool needs_quoting(const char *s, size_t len, bool flow_ctx) {
     /* space or tab at start */
     if (first == ' ' || first == '\t') return true;
 
+    /* U+FEFF at the start would read as a byte order mark and be dropped */
+    if (len >= 3 && first == 0xEF && (uint8_t)s[1] == 0xBB && (uint8_t)s[2] == 0xBF)
+        return true;
+
     /* document markers */
     if (len >= 3 && (memcmp(s, "---", 3) == 0 || memcmp(s, "...", 3) == 0))
         return true;
@@ -743,7 +747,8 @@ yam_status yam_emit(yam_emitter *e, const yam_event *evt) {
         return YAM_OK;
 
     case YAM_EVT_MAPPING_START: {
-        bool use_flow = (e->opts.style != YAM_EMIT_BLOCK) || evt->flow;
+        /* inside a flow collection everything must be flow */
+        bool use_flow = (e->opts.style != YAM_EMIT_BLOCK) || evt->flow || in_any_flow(e);
         emit_ctx *outer = top_ctx(e);
         bool map_value = !use_flow && outer && outer->type == EMIT_CTX_BLOCK_MAP &&
                          !outer->expect_key;
@@ -813,7 +818,8 @@ yam_status yam_emit(yam_emitter *e, const yam_event *evt) {
     }
 
     case YAM_EVT_SEQUENCE_START: {
-        bool use_flow = (e->opts.style != YAM_EMIT_BLOCK) || evt->flow;
+        /* inside a flow collection everything must be flow */
+        bool use_flow = (e->opts.style != YAM_EMIT_BLOCK) || evt->flow || in_any_flow(e);
         emit_ctx *outer = top_ctx(e);
         bool map_value = !use_flow && outer && outer->type == EMIT_CTX_BLOCK_MAP &&
                          !outer->expect_key;

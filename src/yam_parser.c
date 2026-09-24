@@ -157,6 +157,7 @@ struct yam_parser {
 
     /* event handed out by the public yam_parse_next() */
     yam_event out_evt;
+    int       out_depth;    /* nesting of the delivered events */
 
     /* original anchor names by binding serial (see bind_anchors) */
     yam_str *bound_names;
@@ -357,6 +358,25 @@ static inline void attach_props(yam_parser *p, yam_event *evt) {
     if (had_props) {
         evt->start = p->props_start;
     }
+}
+
+/* A flow collection at events[at] turned out to be an implicit key, and a
+ * mapping start is being inserted before it. Properties that were on an
+ * earlier line than the collection belong to that mapping, as they would
+ * for a scalar key ("&m\n[a]: b" anchors the mapping). `anchor` and `tag`
+ * are those properties as written: the event's tag may instead be the
+ * schema's default, which stays with the collection. */
+static void move_props_to_key_map(yam_parser *p, int at, yam_event *map_evt,
+                                  yam_mark coll_start, yam_str anchor, yam_str tag) {
+    yam_event *coll = &p->events[at];
+    map_evt->anchor = anchor;
+    map_evt->tag = tag;         /* insert_event applies the schema default */
+    coll->anchor = YAM_STR_NULL;
+    coll->tag = YAM_STR_NULL;
+    if (p->schema)
+        coll->tag = coll->type == YAM_EVT_MAPPING_START ? p->schema->default_map_tag
+                                                        : p->schema->default_seq_tag;
+    coll->start = coll_start;
 }
 
 /* ── Emit empty scalar ───────────────────────────────────── */
@@ -1451,6 +1471,10 @@ static yam_status parse_block_node(yam_parser *p) {
         /* a key with props on its line starts at them ("&x [a]: b") */
         int flow_col = ((p->has_anchor || p->has_tag) &&
                         p->props_line == p->current.start.line) ? p->props_col : col;
+        bool props_before_line = (p->has_anchor || p->has_tag) &&
+                                 p->props_line != p->current.start.line;
+        yam_str own_anchor = p->has_anchor ? p->pending_anchor : YAM_STR_NULL;
+        yam_str own_tag = p->has_tag ? p->pending_tag : YAM_STR_NULL;
         /* Save queue position in case this is a complex key */
         int saved_evt_len = p->evt_len;
 
@@ -1480,6 +1504,9 @@ static yam_status parse_block_node(yam_parser *p) {
             yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
             map_evt.start = p->events[saved_evt_len].start;
             map_evt.end = p->events[saved_evt_len].start;
+            if (props_before_line)
+                move_props_to_key_map(p, saved_evt_len, &map_evt, open_start,
+                                      own_anchor, own_tag);
             if (!insert_event(p, saved_evt_len, &map_evt)) return OOM_STATUS(p);
             push_ctx(p, CTX_BLOCK_MAP, flow_col);
             st = parse_block_map_value(p, flow_col);
@@ -1503,6 +1530,10 @@ static yam_status parse_block_node(yam_parser *p) {
         /* a key with props on its line starts at them ("&x [a]: b") */
         int flow_col = ((p->has_anchor || p->has_tag) &&
                         p->props_line == p->current.start.line) ? p->props_col : col;
+        bool props_before_line = (p->has_anchor || p->has_tag) &&
+                                 p->props_line != p->current.start.line;
+        yam_str own_anchor = p->has_anchor ? p->pending_anchor : YAM_STR_NULL;
+        yam_str own_tag = p->has_tag ? p->pending_tag : YAM_STR_NULL;
         int saved_evt_len = p->evt_len;
 
         yam_mark open_start2 = p->current.start;
@@ -1529,6 +1560,9 @@ static yam_status parse_block_node(yam_parser *p) {
             yam_event map_evt = evt_simple(YAM_EVT_MAPPING_START);
             map_evt.start = p->events[saved_evt_len].start;
             map_evt.end = p->events[saved_evt_len].start;
+            if (props_before_line)
+                move_props_to_key_map(p, saved_evt_len, &map_evt, open_start2,
+                                      own_anchor, own_tag);
             if (!insert_event(p, saved_evt_len, &map_evt)) return OOM_STATUS(p);
             push_ctx(p, CTX_BLOCK_MAP, flow_col);
             st = parse_block_map_value(p, flow_col);
@@ -2577,6 +2611,31 @@ static bool is_cyclic_name(merge_anchor_table *t, bool *cyclic, yam_str name) {
     return false;
 }
 
+/* Expansion can nest far deeper than the input: in a chain of anchors that
+ * each contain an alias of the previous one, every expansion adds levels.
+ * The depth limit protects consumers that recurse, so it applies to the
+ * expanded stream too. */
+static yam_status check_expanded_depth(yam_parser *p) {
+    if (p->max_depth <= 0) return YAM_OK;
+    int depth = 0;
+    for (int i = 0; i < p->evt_len; i++) {
+        switch (p->events[i].type) {
+        case YAM_EVT_MAPPING_START: case YAM_EVT_SEQUENCE_START:
+            if (++depth > p->max_depth) {
+                hit_limit(p, "nesting depth limit exceeded after alias/merge expansion");
+                return YAM_ERR_LIMIT;
+            }
+            break;
+        case YAM_EVT_MAPPING_END: case YAM_EVT_SEQUENCE_END:
+            depth--;
+            break;
+        default:
+            break;
+        }
+    }
+    return YAM_OK;
+}
+
 static yam_status resolve_aliases(yam_parser *p) {
     /* build initial anchor table for cycle detection */
     merge_anchor_table anchors;
@@ -2688,14 +2747,18 @@ static yam_status resolve_aliases(yam_parser *p) {
  * a token starts after a flow indicator, a line start, a closed quoted
  * scalar or collection, a ':' / '?' / '-' indicator, or an anchor or tag;
  * after other text we are inside a plain scalar (which may contain quote
- * characters: "[a "b"]" is the one scalar 'a "b"'). */
-static bool fk_token_boundary(const char *input, size_t i) {
+ * characters: "[a "b"]" is the one scalar 'a "b"'). `qend` is the offset
+ * just past the last quoted scalar the scan skipped: a quote character
+ * only closes a scalar there (in "[a''b]" the second ' is plain text). */
+static bool fk_token_boundary(const char *input, size_t i, size_t qend) {
     if (i == 0) return true;
     /* fast path: the byte right before decides in the common cases */
     switch (input[i - 1]) {
-    case '[': case '{': case ',': case ']': case '}': case '"': case '\'':
+    case '[': case '{': case ',': case ']': case '}':
     case '\n': case '\r':
         return true;
+    case '"': case '\'':
+        return i == qend;
     case ' ': case '\t': case ':':
         break;
     default:
@@ -2708,16 +2771,24 @@ static bool fk_token_boundary(const char *input, size_t i) {
     char c = input[j - 1];
     switch (c) {
     case '\n': case '\r':
-    case '[': case '{': case ',': case ']': case '}': case '"': case '\'':
+    case '[': case '{': case ',': case ']': case '}':
         return true;
+    case '"': case '\'':
+        return j == qend;
     case ':':
         /* a value indicator: followed by a blank, or adjacent to a
          * JSON-like key ({"a":'b'}) */
         if (blank) return true;
-        return j >= 2 && (input[j - 2] == '"' || input[j - 2] == '\'' ||
+        return j >= 2 && (((input[j - 2] == '"' || input[j - 2] == '\'') && j - 1 == qend) ||
                           input[j - 2] == ']' || input[j - 2] == '}');
     case '?': case '-':
-        return blank;
+        /* an indicator only when it stands alone ("[? "a": b]"); in "b? "
+         * or "x- " it ends a plain scalar */
+        if (!blank) return false;
+        if (j < 2) return true;
+        c = input[j - 2];
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+               c == '[' || c == '{' || c == ',';
     default:
         break;
     }
@@ -2789,23 +2860,23 @@ static inline size_t fk_next(fk_cursor *c) {
     return c->base + k;
 }
 
-/* Consume a quoted scalar whose opening quote is at `i`. Returns false if
- * it is unterminated. */
-static bool fk_skip_quoted(fk_cursor *c, size_t i) {
+/* Consume a quoted scalar whose opening quote is at `i`. Returns the
+ * offset just past its closing quote, or `len` if it is unterminated. */
+static size_t fk_skip_quoted(fk_cursor *c, size_t i) {
     const char *in = c->in;
     char q = in[i];
     for (;;) {
         size_t k = fk_next(c);
-        if (k == c->len) return false;
+        if (k == c->len) return c->len;
         if (in[k] != q) continue;
         if (q == '\'') {
             if (k + 1 < c->len && in[k + 1] == '\'') { fk_next(c); continue; } /* '' */
-            return true;
+            return k + 1;
         }
         /* double-quoted: escaped if preceded by an odd run of backslashes */
         size_t bs = 0;
         while (k - bs > i + 1 && in[k - bs - 1] == '\\') bs++;
-        if (!(bs & 1)) return true;
+        if (!(bs & 1)) return k + 1;
     }
 }
 
@@ -2821,6 +2892,7 @@ static bool fk_scan(yam_parser *p, size_t offset) {
     const char *input = p->input;
     size_t len = p->input_len;
     int depth = 0;
+    size_t qend = SIZE_MAX;     /* just past the last skipped quoted scalar */
     fk_cursor cur = { input, len, 0, 0 };
 
     p->fk_valid = false;
@@ -2832,8 +2904,10 @@ static bool fk_scan(yam_parser *p, size_t offset) {
         if (i == len) goto unterminated;
         switch (input[i]) {
         case '\'': case '"':
-            if (fk_token_boundary(input, i) && !fk_skip_quoted(&cur, i))
-                goto unterminated;
+            if (fk_token_boundary(input, i, qend)) {
+                qend = fk_skip_quoted(&cur, i);
+                if (qend == len) goto unterminated;
+            }
             break;
         case '#':
             /* a comment runs to the next \n, which it consumes */
@@ -3275,10 +3349,11 @@ static yam_status parser_step_flow(yam_parser *p) {
             evt.end = p->current.start;
             inc_emit(p, &evt);
 
-            /* emit empty key */
+            /* emit empty key, with any props before the ':' ("[&a : b]") */
             evt = evt_simple(YAM_EVT_SCALAR);
             evt.start = p->current.start;
             evt.end = p->current.start;
+            attach_props(p, &evt);
             inc_emit(p, &evt);
 
             consume_token(p); /* consume : */
@@ -4360,8 +4435,11 @@ static yam_status next_event(yam_parser *p, yam_event *evt) {
                 st = resolve_aliases(p);
                 if (st != YAM_OK) return st;
             }
-            if (p->merge_enabled || p->resolve_enabled)
+            if (p->merge_enabled || p->resolve_enabled) {
+                st = check_expanded_depth(p);
+                if (st != YAM_OK) return st;
                 unbind_anchors(p);
+            }
             /* skip events already delivered during incremental phase; they
              * must be the ones the eager parse starts with */
             if (p->events_delivered > 0 && p->evt_cursor < p->events_delivered) {
@@ -4472,6 +4550,26 @@ static yam_status next_event(yam_parser *p, yam_event *evt) {
 
 yam_status yam_parse_next(yam_parser *p, const yam_event **evt) {
     yam_status st = next_event(p, &p->out_evt);
+    if (st == YAM_OK) {
+        /* The depth limit protects consumers that recurse, so it applies
+         * to what is delivered: every path (incremental, eager, fallback,
+         * alias/merge expansion) passes through here. */
+        switch (p->out_evt.type) {
+        case YAM_EVT_SEQUENCE_START: case YAM_EVT_MAPPING_START:
+            if (p->max_depth > 0 && p->out_depth >= p->max_depth) {
+                hit_limit(p, "nesting depth limit exceeded");
+                st = YAM_ERR_LIMIT;
+            } else {
+                p->out_depth++;
+            }
+            break;
+        case YAM_EVT_SEQUENCE_END: case YAM_EVT_MAPPING_END:
+            p->out_depth--;
+            break;
+        default:
+            break;
+        }
+    }
     *evt = st == YAM_OK ? &p->out_evt : NULL;
     return st;
 }

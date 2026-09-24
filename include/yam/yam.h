@@ -345,7 +345,9 @@ YAM_API void        yam_parser_set_resolve(yam_parser *p, bool enable);
 YAM_API void        yam_parser_set_max_events(yam_parser *p, int max);
 
 /** Set the maximum nesting depth of collections. Exceeding it stops the
- *  parser with YAM_ERR_LIMIT. Default is 256. Set to 0 to disable the
+ *  parser with YAM_ERR_LIMIT. Default is 256. It applies to the events
+ *  delivered, so it also bounds alias and merge expansion, which can nest
+ *  deeper than the input. Set to 0 to disable the
  *  limit, but note that some inputs (tags, anchors, merge keys, alias
  *  resolution) are parsed recursively, using roughly 1 KB of stack per
  *  level, so very deep input can then overflow the stack. */

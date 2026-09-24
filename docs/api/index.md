@@ -180,7 +180,8 @@ yam_parser_set_max_events(p, 0);       // no limit
 ```
 
 Nesting is limited to 256 levels by default (`yam_parser_set_max_depth`),
-and alias/merge expansion is bounded by the event limit. Exceeding any
+including nesting created by alias/merge expansion, and expansion is
+bounded by the event limit. Exceeding any
 limit returns `YAM_ERR_LIMIT`.
 
 ---

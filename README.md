@@ -265,7 +265,9 @@ structure start/end events), so the default 10,000 events handles roughly
 3,000-5,000 nodes. Documents with large string values use fewer events per
 byte and can go well beyond 200KB at the default limit.
 
-**Nesting depth.** Defaults to 256 levels of nested collections:
+**Nesting depth.** Defaults to 256 levels of nested collections. It applies to
+the events delivered, so it also holds when alias or merge expansion nests
+deeper than the input does:
 
 ```c
 yam_parser_set_max_depth(parser, 1000);

@@ -960,6 +960,8 @@ static yam_status scan_anchor_or_alias(yam_scanner *s, yam_token *tok) {
         /* anchor name: any non-whitespace, non-flow indicator character */
         if (yam_is_blank_or_break(ch) || ch == 0) break;
         if (ch == ',' || ch == '[' || ch == ']' || ch == '{' || ch == '}') break;
+        if (ch < 0x20 || ch == 0x7F)
+            SCAN_ERROR(s, "control character in anchor or alias name");
         advance(s, 1);
     }
     size_t name_len = BUF_AT(s) - name_start;

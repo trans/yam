@@ -418,6 +418,30 @@ static void test_props_across_lines(void) {
     check("- : x\n  k: y", "[ { ~ x k y } ]");
     check("- &a : x\n  !t : y", "[ { &a ~ x <!t> ~ y } ]");
     check("- : x\n   k: y", "[ { ~ ERR");
+    /* props on the line before a flow-collection key belong to the
+     * mapping, as for scalar keys (found by the overnight fuzz run) */
+    check("&a\n[x]: y", "&a { [ x ] y }");
+    check("!t\n{x: 1}: y", "<!t> { { x 1 } y }");
+    check("&a\n!t [x]: y", "&a { <!t> [ x ] y }");
+    check("- &a\n  [x]: y", "[ &a { [ x ] y } ]");
+    check("&a [x]: y", "{ &a [ x ] y }");        /* same line: the key's */
+    check("k: &a\n  [x]\n", "{ k &a [ x ] }");  /* not a key: unchanged */
+    /* props before an empty key in a flow sequence are the key's */
+    check("[&a : b]", "[ { &a ~ b } ]");
+    check("[&a\n : *b]", "[ { &a ~ *b } ]");
+}
+
+/* The flow-key lookahead must not mistake quote characters inside plain
+ * scalars for quoted scalars (found by the overnight fuzz run). */
+static void test_flow_key_quotes_in_plain(void) {
+    printf("test_flow_key_quotes_in_plain:\n");
+    check("[a''b]: c", "{ [ a''b ] c }");         /* '' in plain text */
+    check("[x/\"\"y]: c", "{ [ x/\"\"y ] c }");
+    check("[x  b?  \"b]: c", "{ [ x  b?  \"b ] c }");  /* ? inside a scalar */
+    check("[/'''- \"]: c", "{ [ /'''- \" ] c }");      /* - inside a scalar */
+    check("['a''b', c]: d", "{ [ a'b c ] d }");    /* real quoted scalars */
+    check("{\"a\":\"b\"}: c", "{ { a b } c }");
+    check("[? \"a\"]: c", "{ [ { a ~ } ] c }");     /* real ? indicator */
 }
 
 /* Peak resident memory of this process, in MB. */
@@ -480,6 +504,7 @@ int main(void) {
     test_continuation_indent();
     test_props_across_lines();
     test_plain_scalar_memory();
+    test_flow_key_quotes_in_plain();
 
     printf("\n--- Flow tests: %d / %d passed ---\n", tests_passed, tests_run);
     if (tests_failed > 0) printf("    %d FAILED\n", tests_failed);
