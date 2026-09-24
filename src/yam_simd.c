@@ -34,7 +34,7 @@ static size_t scan_plain_scalar_scalar(const char *buf, size_t len) {
     for (size_t i = 0; i < len; i++) {
         uint8_t c = (uint8_t)buf[i];
         if (c <= ' ' || c == '#' || c == ':' || c == ','
-            || c == '[' || c == ']' || c == '{' || c == '}') {
+            || c == '[' || c == ']' || c == '{' || c == '}' || c == 0x7F) {
             return i;
         }
     }
@@ -83,7 +83,7 @@ static size_t scan_plain_scalar_sse42(const char *buf, size_t len) {
     for (; i < len; i++) {
         uint8_t c = (uint8_t)buf[i];
         if (c <= ' ' || c == '#' || c == ':' || c == ','
-            || c == '[' || c == ']' || c == '{' || c == '}') {
+            || c == '[' || c == ']' || c == '{' || c == '}' || c == 0x7F) {
             return i;
         }
     }

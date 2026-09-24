@@ -158,6 +158,9 @@ static void test_flow_empty_props(void) {
     /* an empty sequence entry before a shallower ':' */
     check("?\n  -\n:\n", "{ [ ~ ] ~ }");
     check("a\x01b: c\n", "ERR");           /* control character */
+    /* ... also where the scanner's 16-byte SIMD path runs */
+    check("k: aaaaaaaaaaaaaaaa\x0f" "bbbbbbbbbbbbbbbb\n", "{ k ERR");
+    check("k: aaaaaaaaaaaaaaaa\x7f" "bbbbbbbbbbbbbbbb\n", "{ k ERR");
     check("%TAG ! a\x01b\n--- x\n", "ERR"); /* ... in a directive */
     /* an explicit entry's ':' is at the mapping's indentation */
     check("? b\n  : x\n", "{ b ERR");

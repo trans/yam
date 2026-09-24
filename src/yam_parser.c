@@ -2674,6 +2674,17 @@ static yam_status resolve_aliases(yam_parser *p) {
  * after other text we are inside a plain scalar (which may contain quote
  * characters: "[a "b"]" is the one scalar 'a "b"'). */
 static bool fk_token_boundary(const char *input, size_t i) {
+    if (i == 0) return true;
+    /* fast path: the byte right before decides in the common cases */
+    switch (input[i - 1]) {
+    case '[': case '{': case ',': case ']': case '}': case '"': case '\'':
+    case '\n': case '\r':
+        return true;
+    case ' ': case '\t': case ':':
+        break;
+    default:
+        return false;   /* inside a plain scalar (or after "?x", "-x") */
+    }
     size_t j = i;
     bool blank = false;
     while (j > 0 && (input[j - 1] == ' ' || input[j - 1] == '\t')) { j--; blank = true; }
@@ -2746,6 +2757,7 @@ static bool fk_colon_follows(const char *input, size_t len, size_t i) {
 static const bool fk_special[256] = {
     ['\''] = true, ['"'] = true, ['#'] = true,
     ['['] = true, [']'] = true, ['{'] = true, ['}'] = true,
+    ['\n'] = true, ['\r'] = true,
 };
 
 static int fk_cmp(const void *a, const void *b) {
@@ -2789,6 +2801,17 @@ static bool fk_scan(yam_parser *p, size_t offset) {
                 p->fk_stack_cap = nc;
             }
             p->fk_stack[depth++] = i;
+            break;
+        case '\n': case '\r':
+            /* An implicit key is a single line: collections still open at
+             * a line break can't be keys, so the scan can stop here. For a
+             * multi-line document (JSON) this keeps the lookahead to one
+             * short scan per line instead of a pass over everything. */
+            if (depth > 0) {
+                p->fk_lo = offset;
+                p->fk_hi = i;
+                goto done;
+            }
             break;
         case ']': case '}':
             if (depth == 0) break;

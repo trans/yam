@@ -77,16 +77,16 @@ static inline bool yam_is_flow_scalar_end(uint8_t c) {
  */
 
 /* Byte ranges for SSE4.2 PCMPISTRI — pairs of [lo, hi] */
-static const char yam_simd_struct_ranges[] = {
-    '\0', '\0',   /* null */
-    '\t', '\r',   /* TAB through CR (covers \t \n \r) */
-    ' ',  ' ',    /* space */
+static const char yam_simd_struct_ranges[16] = {
+    '\0', ' ',   /* NUL through space: all control characters and blanks */
     '#',  '#',    /* comment */
     ',',  ',',    /* flow entry */
     ':',  ':',    /* mapping value */
     '[',  ']',    /* [ \ ] — flow seq + backslash */
     '{',  '}',    /* { | } — flow map + literal/pipe */
+    '\x7f', '\x7f', /* DEL */
 };
-#define YAM_SIMD_STRUCT_RANGES_LEN 16
+
+#define YAM_SIMD_STRUCT_RANGES_LEN 14
 
 #endif /* YAM_CHARS_H */
