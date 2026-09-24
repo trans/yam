@@ -1415,9 +1415,7 @@ yam_status yam_scan_token(yam_scanner *s, yam_token *tok) {
                 break;
             }
             size_t line_start = s->pos + base_indent;
-            size_t rest = 0;
-            while (line_start + rest < s->len && !yam_is_break((uint8_t)s->buf[line_start + rest]))
-                rest++;
+            size_t rest = yam_scan_to_break(s->buf + line_start, s->len - line_start);
             needed += rest + 1; /* content + newline */
             s->pos = line_start + rest;
             if (s->pos < s->len && s->buf[s->pos] == '\r') s->pos++;
@@ -1461,7 +1459,7 @@ yam_status yam_scan_token(yam_scanner *s, yam_token *tok) {
                     lines[nlines++] = (bsline){out, 0, true, 0};
                 }
                 buf[out++] = '\n';
-                advance(s, li);
+                advance_cols(s, (size_t)li);
                 if (!AT_END(s) && yam_is_break(PEEK(s))) skip_break(s);
                 continue;
             }
@@ -1469,22 +1467,21 @@ yam_status yam_scan_token(yam_scanner *s, yam_token *tok) {
              * fall through to content handler (extra spaces are content) */
             if (!line_is_break && li < base_indent) break;
             int extra = li - base_indent;
-            advance(s, base_indent);
+            advance_cols(s, (size_t)base_indent);   /* indentation: spaces */
 
             size_t line_content_start = out;
             /* copy extra indent spaces */
-            for (int j = 0; j < extra; j++) {
-                buf[out++] = ' ';
-                advance(s, 1);
-            }
+            memset(buf + out, ' ', (size_t)extra);
+            out += (size_t)extra;
+            advance_cols(s, (size_t)extra);
             /* check if content starts with whitespace (tab counts as more-indented) */
             bool starts_with_ws = (extra > 0) ||
                 (!AT_END(s) && !yam_is_break(PEEK(s)) && yam_is_blank(PEEK(s)));
-            /* copy line content */
-            while (!AT_END(s) && !yam_is_break(PEEK(s))) {
-                buf[out++] = s->buf[s->pos];
-                advance(s, 1);
-            }
+            /* copy line content: up to the break, so no line changes */
+            size_t n = yam_scan_to_break(BUF_AT(s), REMAINING(s));
+            memcpy(buf + out, BUF_AT(s), n);
+            out += n;
+            advance_cols(s, n);
 
             if (style == YAM_SCALAR_FOLDED && lines) {
                 lines[nlines++] = (bsline){line_content_start, out - line_content_start, false,
