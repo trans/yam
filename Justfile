@@ -64,7 +64,7 @@ test-install-arch:
 test-install-deb:
     #!/usr/bin/env bash
     set -euo pipefail
-    ls pkg/libyam0_*.deb pkg/libyam-dev_*.deb >/dev/null 2>&1 || { echo "no Debian packages in pkg/ — run 'just pkg-deb' first"; exit 1; }
+    ls pkg/libyam1_*.deb pkg/libyam-dev_*.deb >/dev/null 2>&1 || { echo "no Debian packages in pkg/ — run 'just pkg-deb' first"; exit 1; }
     podman run --rm \
       -v "$PWD/pkg:/pkg:ro" \
       -v "$PWD/test/smoke_install.c:/smoke.c:ro" \
@@ -73,9 +73,9 @@ test-install-deb:
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
         apt-get install -y -qq gcc pkg-config libc6-dev >/dev/null
-        apt-get install -y -qq /pkg/libyam0_*.deb /pkg/libyam-dev_*.deb >/dev/null
+        apt-get install -y -qq /pkg/libyam1_*.deb /pkg/libyam-dev_*.deb >/dev/null
         echo "── installed packages ──"
-        dpkg -l libyam0 libyam-dev | tail -3
+        dpkg -l libyam1 libyam-dev | tail -3
         echo "── compile + run ──"
         gcc $(pkg-config --cflags yam) /smoke.c $(pkg-config --libs yam) -o /smoke
         /smoke
@@ -173,7 +173,7 @@ dist:
 pkg-arch: dist
     cd pkg && makepkg -f
 
-# Build the Debian packages (libyam0 + libyam-dev) with dpkg-buildpackage
+# Build the Debian packages (libyam1 + libyam-dev) with dpkg-buildpackage
 pkg-deb: dist
     rm -rf "pkg/build/yam-{{version}}"
     mkdir -p pkg/build

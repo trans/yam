@@ -66,7 +66,7 @@ Short paragraph or bullet list of what's in this release.
 
 Refer to debian/changelog or %changelog in the spec for the per-package
 changelog entries, which are also visible to package users via
-\`apt changelog libyam0\` and \`rpm -q --changelog yam\`.
+\`apt changelog libyam1\` and \`rpm -q --changelog yam\`.
 EOF
 )"
 ```
@@ -88,19 +88,14 @@ version is "real"; everything else is downstream.
 | **MAJOR** | Backward-incompatible API or ABI changes. | 0.4.x → 1.0.0 (stable API) |
 
 **ABI / SONAME.** The shared library's SONAME is `libyam.so.$(SOVERSION)`,
-where `SOVERSION` is `YAM_VERSION_MAJOR` (see the Makefile). So throughout
-the `0.x` series the SONAME stays `libyam.so.0`, regardless of MINOR/PATCH
-bumps. The practical implication: the `0.x` series carries **no ABI
-stability promise**. Downstream consumers should rebuild against a new 0.x
-release; an existing `libyam.so.0` binary may or may not keep working
-depending on what changed. This matches what's conventional for pre-1.0
-libraries.
+where `SOVERSION` is `YAM_VERSION_MAJOR` (see the Makefile). Since 1.0 it is
+`libyam.so.1`, and the ABI is stable within a major version: any ABI break
+requires a MAJOR bump (and thus a SONAME bump, and a new Debian runtime
+package name, `libyamN`), and patch / minor releases must preserve ABI, so a
+binary built against 1.0 keeps working with every later 1.x.
 
-When 1.0 ships, the SONAME becomes `libyam.so.1` and the rules tighten:
-any ABI break requires a MAJOR bump (and thus a SONAME bump), and patch /
-minor releases must preserve ABI. If you want stronger guarantees inside
-`0.x`, decouple `SOVERSION` from `VERSION_MAJOR` in the Makefile and bump
-it by hand on ABI breaks — but that's an explicit choice.
+The `0.x` series (SONAME `libyam.so.0`, package `libyam0`) carried no ABI
+stability promise; programs built against it need rebuilding against 1.x.
 
 What counts as an ABI break:
 
@@ -120,7 +115,7 @@ published` (the auto-build path) and `workflow_dispatch` (manual dry-run path).
 | Job | Builder | Output |
 |-----|---------|--------|
 | **arch** | `archlinux:base-devel` container, `makepkg` | `yam-VERSION-1-x86_64.pkg.tar.zst` (+ auto-split `yam-debug-*`) |
-| **deb** | `ubuntu-latest`, `dpkg-buildpackage -b` | `libyam0_VERSION-1_amd64.deb`, `libyam-dev_VERSION-1_amd64.deb` |
+| **deb** | `ubuntu-latest`, `dpkg-buildpackage -b` | `libyam1_VERSION-1_amd64.deb`, `libyam-dev_VERSION-1_amd64.deb` |
 | **rpm** | `fedora:latest` container, `rpmbuild -bb` | `yam-VERSION-1.fcXX.x86_64.rpm`, `yam-devel-*.rpm` (+ `debuginfo`/`debugsource`) |
 | **release-assets** | `ubuntu-latest` | Downloads the above and attaches them to the release |
 

@@ -1,5 +1,5 @@
 Name:           yam
-Version:        0.3.1
+Version:        1.0.0
 Release:        1%{?dist}
 Summary:        Fast, minimal, zero-copy YAML 1.2 parser and emitter library in C11
 
@@ -57,6 +57,19 @@ make test test-schema test-emitter test-merge test-resolve test-errors \
 %{_libdir}/pkgconfig/yam.pc
 
 %changelog
+* Thu Sep 24 2026 Thomas Sawyer <transfire@gmail.com> - 1.0.0-1
+- First stable release. The ABI is now stable within 1.x; the runtime
+  library is libyam.so.1 (package libyam1, replacing libyam0).
+- API: events and tokens are owned by the library and returned by const
+  pointer; schemas are opaque; the emitter is configured with setters and
+  gains yam_emit_* builders. Only the public API is exported.
+- Conformance: all 308 valid YAML Test Suite cases parse to the expected
+  events and all 94 invalid cases are rejected; emitted YAML parses back
+  to the same data.
+- Safety limits on events, nesting depth and alias/merge expansion.
+- Faster parsing: flow/JSON about 1.7x, block and quoted scalars up to 5x.
+- Many parser and emitter fixes found by fuzzing.
+
 * Wed May 27 2026 Thomas Sawyer <transfire@gmail.com> - 0.3.1-1
 - Add Arch, Debian, and RPM packaging; select the SIMD scanner path at runtime
 

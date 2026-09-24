@@ -109,7 +109,7 @@ jobs:
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
               apt-get install -y -qq gcc pkg-config libc6-dev >/dev/null
-              apt-get install -y -qq /pkg/libyam0_*.deb /pkg/libyam-dev_*.deb >/dev/null
+              apt-get install -y -qq /pkg/libyam1_*.deb /pkg/libyam-dev_*.deb >/dev/null
               gcc $(pkg-config --cflags yam) /smoke.c $(pkg-config --libs yam) -o /smoke
               /smoke
             '

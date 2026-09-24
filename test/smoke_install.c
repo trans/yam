@@ -6,7 +6,7 @@
  *
  *   1. Headers landed where the compiler can find them (yam/yam.h).
  *   2. pkg-config resolves both Cflags and Libs (the .pc file is valid).
- *   3. The dynamic linker finds libyam.so.0 at run time (ldconfig ran,
+ *   3. The dynamic linker finds libyam.so.1 at run time (ldconfig ran,
  *      and the lib is on the standard search path).
  *   4. The library actually parses a real document end-to-end.
  *
