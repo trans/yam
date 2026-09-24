@@ -157,7 +157,6 @@ struct yam_parser {
 
     /* event handed out by the public yam_parse_next() */
     yam_event out_evt;
-    int       out_depth;    /* nesting of the delivered events */
 
     /* original anchor names by binding serial (see bind_anchors) */
     yam_str *bound_names;
@@ -2611,18 +2610,21 @@ static bool is_cyclic_name(merge_anchor_table *t, bool *cyclic, yam_str name) {
     return false;
 }
 
-/* Expansion can nest far deeper than the input: in a chain of anchors that
- * each contain an alias of the previous one, every expansion adds levels.
- * The depth limit protects consumers that recurse, so it applies to the
- * expanded stream too. */
-static yam_status check_expanded_depth(yam_parser *p) {
+/* The depth limit protects consumers that recurse, so it applies to the
+ * finished eager event list, whatever built it: a flow collection used as a
+ * key gains a mapping around it, and alias/merge expansion can nest far
+ * deeper than the input (in a chain of anchors that each contain an alias
+ * of the previous one, every expansion adds levels). */
+static yam_status check_eager_depth(yam_parser *p) {
     if (p->max_depth <= 0) return YAM_OK;
     int depth = 0;
     for (int i = 0; i < p->evt_len; i++) {
         switch (p->events[i].type) {
         case YAM_EVT_MAPPING_START: case YAM_EVT_SEQUENCE_START:
             if (++depth > p->max_depth) {
-                hit_limit(p, "nesting depth limit exceeded after alias/merge expansion");
+                hit_limit(p, p->merge_enabled || p->resolve_enabled
+                                 ? "nesting depth limit exceeded after alias/merge expansion"
+                                 : "nesting depth limit exceeded");
                 return YAM_ERR_LIMIT;
             }
             break;
@@ -3009,6 +3011,16 @@ static inline void inc_push_frame(yam_parser *p, ctx_type type, int indent,
         return;
     }
     if (p->max_depth > 0 && p->frame_len >= p->max_depth) {
+        /* the collection's start event (and, for a block mapping, its
+         * first key) was just queued: withhold them, so no delivered event
+         * nests deeper than the limit */
+        for (int k = p->out_len - 1; k >= p->out_cursor; k--) {
+            if (p->out_buf[k].type == YAM_EVT_MAPPING_START ||
+                p->out_buf[k].type == YAM_EVT_SEQUENCE_START) {
+                p->out_len = k;
+                break;
+            }
+        }
         hit_limit(p, "nesting depth limit exceeded");
         return;
     }
@@ -4435,11 +4447,10 @@ static yam_status next_event(yam_parser *p, yam_event *evt) {
                 st = resolve_aliases(p);
                 if (st != YAM_OK) return st;
             }
-            if (p->merge_enabled || p->resolve_enabled) {
-                st = check_expanded_depth(p);
-                if (st != YAM_OK) return st;
+            if (p->merge_enabled || p->resolve_enabled)
                 unbind_anchors(p);
-            }
+            st = check_eager_depth(p);
+            if (st != YAM_OK) return st;
             /* skip events already delivered during incremental phase; they
              * must be the ones the eager parse starts with */
             if (p->events_delivered > 0 && p->evt_cursor < p->events_delivered) {
@@ -4550,26 +4561,6 @@ static yam_status next_event(yam_parser *p, yam_event *evt) {
 
 yam_status yam_parse_next(yam_parser *p, const yam_event **evt) {
     yam_status st = next_event(p, &p->out_evt);
-    if (st == YAM_OK) {
-        /* The depth limit protects consumers that recurse, so it applies
-         * to what is delivered: every path (incremental, eager, fallback,
-         * alias/merge expansion) passes through here. */
-        switch (p->out_evt.type) {
-        case YAM_EVT_SEQUENCE_START: case YAM_EVT_MAPPING_START:
-            if (p->max_depth > 0 && p->out_depth >= p->max_depth) {
-                hit_limit(p, "nesting depth limit exceeded");
-                st = YAM_ERR_LIMIT;
-            } else {
-                p->out_depth++;
-            }
-            break;
-        case YAM_EVT_SEQUENCE_END: case YAM_EVT_MAPPING_END:
-            p->out_depth--;
-            break;
-        default:
-            break;
-        }
-    }
     *evt = st == YAM_OK ? &p->out_evt : NULL;
     return st;
 }

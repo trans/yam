@@ -349,6 +349,14 @@ static int parse_test_file(const char *path, const char *id, test_case *cases, i
             }
         }
 
+        /* an entry without its own expected outcome reuses the previous
+         * entry's, as the suite's own tooling does (MUS6:4 ... MUS6:6) */
+        if (count > 0 && !tc->fail && tc->tree[0] == '\0') {
+            const test_case *prev = &cases[count - 1];
+            tc->fail = prev->fail;
+            memcpy(tc->tree, prev->tree, sizeof(tc->tree));
+        }
+
         count++;
         pos = entry_end;
     }

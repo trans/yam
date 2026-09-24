@@ -31,9 +31,12 @@ $CC -O2 -I"$ROOT/bench" "$HERE/gen_inputs.c" -o "$OUT/gen_inputs"
 "$OUT/gen_inputs" "$OUT" "$SIZE"
 
 LIBS="yam"
-# yam is compiled from source here so it always gets these CFLAGS (the
-# Makefile doesn't rebuild build/libyam.a when CFLAGS change)
-$CC -std=c11 $CFLAGS -I"$ROOT/include" "$HERE/cmp_yam.c" "$ROOT"/src/*.c -o "$OUT/cmp_yam"
+# yam is linked against the library as `make` builds it (code layout can
+# move results by several percent), built fresh into its own directory so
+# it always gets these CFLAGS and leaves build/ alone
+rm -rf "$OUT/yam_obj"
+make -s -C "$ROOT" CC="$CC" CFLAGS="$CFLAGS" OBJDIR="$OUT/yam_obj" "$OUT/yam_obj/libyam.a"
+$CC -std=c11 $CFLAGS -I"$ROOT/include" "$HERE/cmp_yam.c" "$OUT/yam_obj/libyam.a" -o "$OUT/cmp_yam"
 if $CC $CFLAGS "$HERE/cmp_libyaml.c" -lyaml -o "$OUT/cmp_libyaml" 2>/dev/null; then
     LIBS="$LIBS libyaml"
 else
