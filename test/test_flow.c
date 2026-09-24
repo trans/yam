@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/resource.h>
 
 static int tests_run    = 0;
 static int tests_passed = 0;
@@ -419,6 +420,50 @@ static void test_props_across_lines(void) {
     check("- : x\n   k: y", "[ { ~ ERR");
 }
 
+/* Peak resident memory of this process, in MB. */
+static long peak_rss_mb(void) {
+    struct rusage r;
+    getrusage(RUSAGE_SELF, &r);
+#ifdef __APPLE__
+    return r.ru_maxrss / (1024 * 1024);  /* bytes */
+#else
+    return r.ru_maxrss / 1024;           /* KB */
+#endif
+}
+
+/* A multi-line plain scalar used to reserve a buffer the size of the rest
+ * of the input, so memory grew with (scalars x input size): 2 MB of them
+ * asked for tens of GB and failed. */
+static void test_plain_scalar_memory(void) {
+    printf("test_plain_scalar_memory:\n");
+    int entries = 40000;
+    size_t cap = (size_t)entries * 64, len = 0;
+    char *buf = malloc(cap);
+    for (int i = 0; i < entries; i++)
+        len += (size_t)snprintf(buf + len, cap - len,
+                                "k%d: some plain text\n  continued here\n", i);
+
+    long rss0 = peak_rss_mb();
+    yam_arena  *a = yam_arena_new(4096);
+    yam_parser *p = yam_parser_new(buf, len, a);
+    yam_parser_set_max_events(p, 0);
+    const yam_event *evt;
+    yam_status st;
+    int scalars = 0;
+    while ((st = yam_parse_next(p, &evt)) == YAM_OK &&
+           evt->type != YAM_EVT_STREAM_END && evt->type != YAM_EVT_NONE)
+        if (evt->type == YAM_EVT_SCALAR) scalars++;
+    long grew = peak_rss_mb() - rss0;
+
+    ASSERT(st == YAM_OK, "many multi-line plain scalars parse");
+    ASSERT(scalars == entries * 2, "one key and one value per entry");
+    ASSERT(grew < 256, "memory stays proportional to the input");
+
+    yam_parser_free(p);
+    yam_arena_free(a);
+    free(buf);
+}
+
 /* ── Main ───────────────────────────────────────────────────── */
 
 int main(void) {
@@ -434,6 +479,7 @@ int main(void) {
     test_stray_flow_indicators();
     test_continuation_indent();
     test_props_across_lines();
+    test_plain_scalar_memory();
 
     printf("\n--- Flow tests: %d / %d passed ---\n", tests_passed, tests_run);
     if (tests_failed > 0) printf("    %d FAILED\n", tests_failed);

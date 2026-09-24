@@ -427,7 +427,7 @@ static yam_status scan_plain_scalar(yam_scanner *s, yam_token *tok) {
 
     #define SWITCH_TO_BUF() do { \
         if (!in_buf) { \
-            buf_cap = single_len + REMAINING(s) + 64; \
+            buf_cap = single_len * 2 + 256; /* APPEND_* grow it */ \
             buf = yam_arena_alloc(s->arena, buf_cap, 1); \
             if (!buf) return YAM_ERR_MEMORY; \
             memcpy(buf, single_start, single_len); \
