@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }}, ${{ matrix.cc }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, cc: gcc }
+          - { os: ubuntu-latest, cc: clang }
+          - { os: macos-latest, cc: clang }
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true   # yaml-test-suite
+
+      # Portable flags: the Makefile default (-march=native) is for local use
+      - name: Build and run all tests
+        run: make CC=${{ matrix.cc }} CFLAGS=-O2 test-all
+
+  sanitize:
+    name: Sanitizers (ASan + UBSan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Install just
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq just
+
+      - name: Run tests under sanitizers
+        run: just sanitize
+
+  fuzz:
+    name: Fuzz (parser + emitter round trip)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build fuzzer
+        run: make build/fuzz_parser
+
+      # Short run on every push to catch regressions; long runs happen
+      # before releases.
+      - name: Fuzz for 3 minutes
+        run: |
+          mkdir -p fuzz/corpus fuzz/crashes
+          ./build/fuzz_parser -max_total_time=180 -timeout=5 -rss_limit_mb=2048 \
+            -max_len=4096 -artifact_prefix=fuzz/crashes/ fuzz/corpus
+
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: fuzz/crashes/
