@@ -559,6 +559,7 @@ static void test_fuzz_found_emit(void) {
     yam_str out = yam_emitter_output(e);
     ASSERT(!str_contains(out, "- \xEF\xBB\xBFx"), "leading U+FEFF is quoted");
     ASSERT(str_contains(out, "[[a]]"), "block sequence inside flow is written as flow");
+    yam_emitter_free(e);
     yam_arena_free(a);
 }
 
