@@ -1,0 +1,3 @@
+build/
+fuzz/corpus/
+fuzz/crashes/

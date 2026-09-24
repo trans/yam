@@ -1,0 +1,30 @@
+# ClusterFuzzLite on pull requests: 10 minutes per sanitizer on the fuzz
+# targets the change affects, starting from the batch-fuzzing corpus.
+name: ClusterFuzzLite PR fuzzing
+on:
+  pull_request:
+permissions: read-all
+jobs:
+  PR:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.sanitizer }}-${{ github.ref }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined]
+    steps:
+    - name: Build fuzzers (${{ matrix.sanitizer }})
+      uses: google/clusterfuzzlite/actions/build_fuzzers@v1
+      with:
+        language: c
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        sanitizer: ${{ matrix.sanitizer }}
+    - name: Run fuzzers (${{ matrix.sanitizer }})
+      uses: google/clusterfuzzlite/actions/run_fuzzers@v1
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        fuzz-seconds: 600
+        mode: 'code-change'
+        sanitizer: ${{ matrix.sanitizer }}
