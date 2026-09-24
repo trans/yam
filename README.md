@@ -177,7 +177,12 @@ and options can be added without breaking compiled programs.
 
 ## Emitter
 
-The emitter converts an event stream back into YAML text. Three output
+The emitter converts an event stream back into YAML text that parses back
+to the same data: every valid YAML Test Suite case round-trips (parse,
+emit, parse) with identical events in all three styles, and the fuzzer
+checks the same property on arbitrary input. Block scalars are written as
+exact literals, collections used as keys take the explicit `? key` form,
+and tags are written in a form that reads back unchanged. Three output
 styles are available:
 
 | Style | Description |

@@ -162,6 +162,9 @@ static void test_flow_empty_props(void) {
     check("k: aaaaaaaaaaaaaaaa\x0f" "bbbbbbbbbbbbbbbb\n", "{ k ERR");
     check("k: aaaaaaaaaaaaaaaa\x7f" "bbbbbbbbbbbbbbbb\n", "{ k ERR");
     check("%TAG ! a\x01b\n--- x\n", "ERR"); /* ... in a directive */
+    /* a line-start ':' (empty key) marks its mapping's indentation, so a
+     * block scalar value doesn't swallow the next key */
+    check("k:\n  ?\n    : |-\n    2:\n  :\n", "{ k { { ~ ~ 2 ~ } ~ } }");
     /* an explicit entry's ':' is at the mapping's indentation */
     check("? b\n  : x\n", "{ b ERR");
     check("- ? b\n  : x\n", "[ { b x } ]");

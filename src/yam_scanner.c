@@ -1249,6 +1249,10 @@ yam_status yam_scan_token(yam_scanner *s, yam_token *tok) {
                 if (tab_after_indicator(s, s->node_start))
                     SCAN_ERROR(s, "tabs are not allowed before a nested block collection");
                 s->key_colon_line = s->line;
+            } else {
+                /* a ':' starting its line (an explicit value, or an empty
+                 * key) sits at its mapping's indentation */
+                map_col = colon_col;
             }
             if (map_col > s->indent) {
                 indent_push(s, map_col);
