@@ -456,6 +456,50 @@ static void test_owned_pointers(void) {
     yam_arena_free(a);
 }
 
+/* ── yam_read_file edge cases ─────────────────────────────── */
+
+#include <errno.h>
+
+static void test_read_file_edges(void) {
+    printf("test_read_file_edges:\n");
+    yam_arena *a = yam_arena_new(4096);
+
+    /* a directory is an error, not an empty file */
+    errno = 0;
+    yam_str d = yam_read_file("/tmp", a);
+    ASSERT(d.data == NULL && errno == EISDIR, "directory fails with EISDIR");
+
+    /* files that report size 0 but have content (Linux /proc) */
+    FILE *probe = fopen("/proc/self/status", "rb");
+    if (probe) {
+        fclose(probe);
+        yam_str p = yam_read_file("/proc/self/status", a);
+        ASSERT(p.data != NULL && p.len > 0, "reads /proc files (size 0 reported)");
+    }
+
+    /* an empty file */
+    const char *path = "/tmp/yam_test_empty.yaml";
+    FILE *f = fopen(path, "wb");
+    if (f) fclose(f);
+    yam_str e = yam_read_file(path, a);
+    ASSERT(e.data != NULL && e.len == 0, "empty file reads as empty data");
+    remove(path);
+
+    /* larger than the initial read buffer */
+    path = "/tmp/yam_test_big.yaml";
+    f = fopen(path, "wb");
+    size_t n = 0;
+    if (f) {
+        for (int i = 0; i < 20000; i++) n += (size_t)fprintf(f, "key%d: value\n", i);
+        fclose(f);
+    }
+    yam_str b = yam_read_file(path, a);
+    ASSERT(b.data != NULL && b.len == n, "large file reads completely");
+    remove(path);
+
+    yam_arena_free(a);
+}
+
 /* ── Main ───────────────────────────────────────────────────── */
 
 int main(void) {
@@ -484,6 +528,7 @@ int main(void) {
     test_bom();
     test_arena_limits();
     test_owned_pointers();
+    test_read_file_edges();
 
     printf("\n--- Error tests: %d / %d passed ---\n", tests_passed, tests_run);
     if (tests_failed > 0) printf("    %d FAILED\n", tests_failed);

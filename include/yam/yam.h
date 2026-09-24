@@ -194,8 +194,10 @@ YAM_API void        yam_arena_free(yam_arena *a);
 
 /* ── File input ─────────────────────────────────────────── */
 
-/** Read an entire file into the arena. Returns a yam_str with .data=NULL
- *  on failure. The buffer is not NUL-terminated. */
+/** Read an entire file (or pipe) into the arena. Returns a yam_str with
+ *  .data=NULL on failure (including when @p path is a directory), with
+ *  errno describing the cause. An empty file gives .len=0 and non-NULL
+ *  .data. The buffer is not NUL-terminated. */
 YAM_API yam_str     yam_read_file(const char *path, yam_arena *a);
 
 /* ── Scanner ─────────────────────────────────────────────── */

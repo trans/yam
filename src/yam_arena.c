@@ -5,11 +5,15 @@
  * One free at the end. No per-object bookkeeping.
  */
 
+#define _POSIX_C_SOURCE 200809L   /* fileno, fstat */
+
 #include "yam/yam.h"
+#include <sys/stat.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 
 /* ── Block ───────────────────────────────────────────────── */
 
@@ -133,23 +137,44 @@ void yam_arena_reset(yam_arena *a) {
 
 /* ── File input ──────────────────────────────────────────── */
 
+/* Read until EOF (so pipes and /proc files, which report size 0, work),
+ * checking for read errors; directories are rejected. The data ends up in
+ * the arena; failure returns {NULL, 0} with errno describing the cause. */
 yam_str yam_read_file(const char *path, yam_arena *a) {
     FILE *f = fopen(path, "rb");
     if (!f) return (yam_str){NULL, 0};
 
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0) { fclose(f); return (yam_str){NULL, 0}; }
+    if (S_ISDIR(st.st_mode)) { fclose(f); errno = EISDIR; return (yam_str){NULL, 0}; }
 
-    if (size < 0) { fclose(f); return (yam_str){NULL, 0}; }
-
-    char *buf = yam_arena_alloc(a, (size_t)size, 1);
+    /* start from the reported size (+1 so EOF is seen without growing) */
+    size_t cap = (S_ISREG(st.st_mode) && st.st_size > 0) ? (size_t)st.st_size + 1 : 65536;
+    char *buf = malloc(cap);
     if (!buf) { fclose(f); return (yam_str){NULL, 0}; }
 
-    size_t nread = fread(buf, 1, (size_t)size, f);
+    size_t len = 0;
+    for (;;) {
+        if (len == cap) {
+            if (cap > SIZE_MAX / 2) { free(buf); fclose(f); errno = EFBIG; return (yam_str){NULL, 0}; }
+            char *nb = realloc(buf, cap * 2);
+            if (!nb) { free(buf); fclose(f); return (yam_str){NULL, 0}; }
+            buf = nb;
+            cap *= 2;
+        }
+        size_t n = fread(buf + len, 1, cap - len, f);
+        len += n;
+        if (n == 0) break;
+    }
+    bool failed = ferror(f) != 0;
     fclose(f);
+    if (failed) { free(buf); errno = EIO; return (yam_str){NULL, 0}; }
 
-    return (yam_str){buf, nread};
+    char *data = yam_arena_alloc(a, len ? len : 1, 1);
+    if (data && len) memcpy(data, buf, len);
+    free(buf);
+    if (!data) return (yam_str){NULL, 0};
+    return (yam_str){data, len};
 }
 
 void yam_arena_free(yam_arena *a) {
