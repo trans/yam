@@ -2783,14 +2783,16 @@ static bool fk_token_boundary(const char *input, size_t i, size_t qend) {
         if (blank) return true;
         return j >= 2 && (((input[j - 2] == '"' || input[j - 2] == '\'') && j - 1 == qend) ||
                           input[j - 2] == ']' || input[j - 2] == '}');
-    case '?': case '-':
-        /* an indicator only when it stands alone ("[? "a": b]"); in "b? "
-         * or "x- " it ends a plain scalar */
+    case '?': case '-': {
+        /* an indicator only at the start of an entry ("[? "a": b]",
+         * "[x, ? "a"]"); in "b? ", "x- " or "L ? " it is plain text */
         if (!blank) return false;
-        if (j < 2) return true;
-        c = input[j - 2];
-        return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
-               c == '[' || c == '{' || c == ',';
+        size_t k = j - 1;           /* the '?' or '-' */
+        while (k > 0 && (input[k - 1] == ' ' || input[k - 1] == '\t')) k--;
+        if (k == 0) return true;
+        c = input[k - 1];
+        return c == '\n' || c == '\r' || c == '[' || c == '{' || c == ',';
+    }
     default:
         break;
     }

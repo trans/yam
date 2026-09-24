@@ -445,6 +445,8 @@ static void test_flow_key_quotes_in_plain(void) {
     check("['a''b', c]: d", "{ [ a'b c ] d }");    /* real quoted scalars */
     check("{\"a\":\"b\"}: c", "{ { a b } c }");
     check("[? \"a\"]: c", "{ [ { a ~ } ] c }");     /* real ? indicator */
+    check("[L ? \"]: x", "{ [ L ? \" ] x }");       /* ? mid-scalar (ClusterFuzzLite) */
+    check("[x, ? \"a\"]: c", "{ [ x { a ~ } ] c }"); /* ? starting an entry */
 }
 
 /* Peak resident memory of this process, in MB. */
