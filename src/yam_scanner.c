@@ -1226,14 +1226,18 @@ yam_status yam_scan_token(yam_scanner *s, yam_token *tok) {
         uint8_t next = PEEK_AT(s, 1);
         if (s->flow_level == 0 && (yam_is_blank_or_break(next) || next == 0)) {
             int colon_col = (int)s->col - 1;
-            int key_col = s->last_token_col;  /* 0-based col of the key */
             /* when a node (scalar, alias, or flow collection) directly
              * precedes the ':', the key starts where it does, or at props
-             * right before it on its line ("&k key:", "!!map {a: b}:") */
+             * right before it on its line ("&k key:", "!!map {a: b}:");
+             * an empty key starts at its props ("&k :") or the ':' itself
+             * ("- : v") */
+            int key_col = colon_col;
             if (only_blanks_between(s, s->node_end, s->pos)) {
                 key_col = s->node_col;
                 if (only_blanks_between(s, s->props_end, s->node_start))
                     key_col = s->props_col;
+            } else if (only_blanks_between(s, s->props_end, s->pos)) {
+                key_col = s->props_col;
             }
             /* use minimum of key and colon column — handles explicit key
              * (? key\n: val) where colon_col is the mapping indent */

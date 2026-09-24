@@ -499,6 +499,16 @@ static bool props_continuation_ok(yam_parser *p) {
     return tok_col(p) > parent;
 }
 
+/* Does the current property token have content after it on its line?
+ * Then it starts the props of that content (a key), not of the node
+ * whose props began on an earlier line. */
+static bool prop_starts_node_line(yam_parser *p) {
+    size_t i = p->current.end.offset;
+    while (i < p->input_len && (p->input[i] == ' ' || p->input[i] == '\t')) i++;
+    return i < p->input_len && p->input[i] != '\n' && p->input[i] != '\r' &&
+           p->input[i] != '#';
+}
+
 static yam_status consume_props(yam_parser *p) {
     /* Consume at most one anchor and one tag per node */
     for (;;) {
@@ -511,10 +521,12 @@ static yam_status consume_props(yam_parser *p) {
             if (!props_continuation_ok(p)) break;
         }
         if (tok_type(p) == YAM_TOK_ANCHOR && !p->has_anchor) {
-            /* If we already have a tag on a previous line and see an anchor
-             * on a new line, stop — the tag is for the collection and the
-             * anchor starts props for the first element. */
-            if (p->has_tag && p->current.start.line != p->props_line) break;
+            /* In block context, a tag on a previous line and an anchor on
+             * a new line followed by content: stop — the tag is for the
+             * collection and the anchor starts props for the first key.
+             * An anchor alone on its line still belongs to the collection. */
+            if (p->has_tag && p->current.start.line != p->props_line &&
+                !in_flow(p) && prop_starts_node_line(p)) break;
             if (!p->has_tag) {
                 p->props_line = p->current.start.line;
                 p->props_col = tok_col(p);
@@ -524,6 +536,9 @@ static yam_status consume_props(yam_parser *p) {
             p->has_anchor = true;
             consume_token(p);
         } else if (tok_type(p) == YAM_TOK_TAG && !p->has_tag) {
+            /* likewise an anchor on a previous line and a tag on a new one */
+            if (p->has_anchor && p->current.start.line != p->props_line &&
+                !in_flow(p) && prop_starts_node_line(p)) break;
             if (!p->has_anchor) {
                 p->props_line = p->current.start.line;
                 p->props_col = tok_col(p);

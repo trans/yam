@@ -6,7 +6,7 @@
  * implementation for the incremental state machine.
  */
 
-#define _POSIX_C_SOURCE 199309L
+#define _POSIX_C_SOURCE 200809L
 
 #include "yam/yam.h"
 #include <stdio.h>
@@ -29,7 +29,7 @@ static int tests_failed = 0;
 } while(0)
 
 /* Render the event stream as a compact string, e.g. "[ a { b c } ]".
- * Stream/document events are omitted; &anchor prefixes the node.
+ * Stream/document events are omitted; &anchor and <tag> prefix the node.
  * A parse error appends "ERR". */
 static void render(const char *yaml, bool eager, char *out, size_t cap) {
     size_t n = 0;
@@ -56,6 +56,8 @@ static void render(const char *yaml, bool eager, char *out, size_t cap) {
         if (n) n += snprintf(out + n, cap - n, " ");
         if (evt->anchor.data)
             n += snprintf(out + n, cap - n, "&%.*s ", (int)evt->anchor.len, evt->anchor.data);
+        if (evt->tag.data)
+            n += snprintf(out + n, cap - n, "<%.*s> ", (int)evt->tag.len, evt->tag.data);
         if (s) {
             n += snprintf(out + n, cap - n, "%s", s);
         } else if (evt->type == YAM_EVT_ALIAS) {
@@ -136,7 +138,7 @@ static void test_flow_empty_props(void) {
     check("[&a ]", "[ &a ~ ]");
     check("[&a x: y]", "[ { &a x y } ]");
     check("{a: &b , c: d}", "{ a &b ~ c d }");
-    check("k: &a\n!t :\n", "{ k &a ~ ~ ~ }");   /* next entry: tagged empty key */
+    check("k: &a\n!t :\n", "{ k &a ~ <!t> ~ ~ }");   /* next entry: tagged empty key */
     /* props on an empty value, then a sibling entry with props */
     check("k: &a\n&b x: y\n", "{ k &a ~ &b x y }");
     check("a: b\n&k : v\n", "{ a b &k ~ v }");
@@ -145,7 +147,7 @@ static void test_flow_empty_props(void) {
     check("a: ? b\n", "{ a ERR");            /* '?' on an implicit key's line */
     check("? []\n[]\n", "{ [ ] ~ ERR");       /* flow key without ':' */
     /* a flow-collection key: indentation counts from where it starts */
-    check("!!map {a: b}: |\n  # t\n", "{ { a b } # t\n }");
+    check("!!map {a: b}: |\n  # t\n", "{ <tag:yaml.org,2002:map> { a b } # t\n }");
     check("&r\n&k {a: &n }: |\n  x\n", "&r { &k { a &n ~ } x\n }");  /* props inside */
     /* a key with props on its line: indentation counts from the props */
     check("&r\n&k oo: |\n  a\n", "&r { &k oo a\n }");
@@ -391,6 +393,32 @@ static void test_continuation_indent(void) {
     check("- [\n\tfoo\n ]", "[ [ ERR");               /* tab isn't indentation */
 }
 
+/* Properties on separate lines: in block context the earlier line's
+ * belong to the collection, the key line's to the key; in flow context
+ * they all belong to one node. */
+static void test_props_across_lines(void) {
+    printf("test_props_across_lines:\n");
+    check("&a\n!t k: v", "&a { <!t> k v }");
+    check("!t\n&b k: v", "<!t> { &b k v }");
+    check("k: &a\n !t\n  a: b", "{ k &a <!t> { a b } }");  /* BU8L: alone on its line */
+    check("&a\n!t\nk: v", "&a <!t> { k v }");
+    check("!t\n&a # c\nk: v", "&a <!t> { k v }");
+    check("&?\t?\t!\t6", "&? { <!> 6 ~ }");            /* found by fuzzing */
+    check("- &a\n  !t k: v", "[ &a { <!t> k v } ]");
+    check("x: &a\n  !t k: v", "{ x &a { <!t> k v } }");
+    check("x: &a\n  !t y", "{ x &a <!t> y }");
+    check("--- &a\n!t x", "&a <!t> x");
+    check("!t\n&b x", "&b <!t> x");
+    check("[&a\n !t x]", "[ &a <!t> x ]");
+    check("[!t\n &b x]", "[ &b <!t> x ]");
+    check("{&a\n !t x: y}", "{ &a <!t> x y }");
+    /* a compact mapping with an empty first key starts at the ':' (or
+     * its props), so the next line's key is a sibling (found by fuzzing) */
+    check("- : x\n  k: y", "[ { ~ x k y } ]");
+    check("- &a : x\n  !t : y", "[ { &a ~ x <!t> ~ y } ]");
+    check("- : x\n   k: y", "[ { ~ ERR");
+}
+
 /* ── Main ───────────────────────────────────────────────────── */
 
 int main(void) {
@@ -405,6 +433,7 @@ int main(void) {
     test_event_limit();
     test_stray_flow_indicators();
     test_continuation_indent();
+    test_props_across_lines();
 
     printf("\n--- Flow tests: %d / %d passed ---\n", tests_passed, tests_run);
     if (tests_failed > 0) printf("    %d FAILED\n", tests_failed);
